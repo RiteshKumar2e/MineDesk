@@ -1,0 +1,268 @@
+// MineDesk data model.
+//
+// Rules that shaped this schema:
+//   * Everything hangs off User with ON DELETE CASCADE, so deleting an account
+//     really removes the account.
+//   * No secret is ever stored in a reversible form except the TOTP seed, which
+//     must be reversible to verify codes and is therefore AES-256-GCM encrypted
+//     with a key that lives outside the database.
+//   * Audit rows survive the deletion of the session they describe (SetNull),
+//     because the security record must outlive the thing it records.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DeviceOs {
+  windows
+  macos
+  linux
+  unknown
+}
+
+enum DeviceStatus {
+  online
+  offline
+}
+
+enum SessionStatus {
+  pending
+  active
+  reconnecting
+  ended
+  denied
+  failed
+}
+
+enum VerificationTokenType {
+  email_verification
+  password_reset
+}
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique
+  passwordHash  String
+  name          String
+  emailVerified Boolean  @default(false)
+
+  // Two-factor authentication (TOTP). The secret is encrypted at rest.
+  twoFactorEnabled       Boolean  @default(false)
+  twoFactorSecret        String?
+  twoFactorBackupCodes   String[] @default([])
+
+  // Brute-force protection state, kept here so it survives a Redis flush.
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  authSessions       AuthSession[]
+  devices            Device[]
+  verificationTokens VerificationToken[]
+  remoteSessions     RemoteSession[]
+  auditLogs          AuditLog[]
+
+  @@index([email])
+  @@map("users")
+}
+
+/// One row per signed-in browser. Holds a refresh-token family; rotating the
+/// token updates tokenHash in place and bumps rotationCounter.
+model AuthSession {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the opaque refresh token. The token itself is never stored.
+  tokenHash       String    @unique
+  /// Hash of the token this one replaced. Presenting it again is a replay and
+  /// revokes the whole session - see rotateRefreshToken().
+  previousTokenHash String?
+  /// Set when the token has been rotated away.
+  replacedAt      DateTime?
+  rotationCounter Int       @default(0)
+  revokedAt       DateTime?
+  revokedReason   String?
+
+  ipAddress String?
+  userAgent String?
+
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
+  @@index([previousTokenHash])
+  @@map("auth_sessions")
+}
+
+/// Single-use, hashed tokens for email verification and password reset.
+model VerificationToken {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type      VerificationTokenType
+  tokenHash String                @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime              @default(now())
+
+  @@index([userId, type])
+  @@index([expiresAt])
+  @@map("verification_tokens")
+}
+
+model Device {
+  id       String @id @default(uuid()) @db.Uuid
+  /// Human-shareable identifier, e.g. RMT-8F32-A91C
+  deviceId String @unique
+  userId   String @db.Uuid
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name         String
+  os           DeviceOs     @default(unknown)
+  osVersion    String?
+  agentVersion String?
+  hostname     String?
+  status       DeviceStatus @default(offline)
+  lastSeenAt   DateTime?
+
+  /// Argon2 hash of the agent credential. Rotating it revokes the agent.
+  agentSecretHash String?
+  enrolledAt      DateTime?
+
+  /// Unattended access is opt-in and requires a separate access password.
+  unattendedAccessEnabled  Boolean @default(false)
+  unattendedPasswordHash   String?
+
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  permissions     DevicePermission?
+  enrollmentCodes EnrollmentCode[]
+  remoteSessions  RemoteSession[]
+  auditLogs       AuditLog[]
+
+  @@index([userId, status])
+  @@index([lastSeenAt])
+  @@map("devices")
+}
+
+/// The capability mask enforced by the API and re-checked by the agent.
+model DevicePermission {
+  id       String @id @default(uuid()) @db.Uuid
+  deviceId String @unique @db.Uuid
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  screen       Boolean @default(true)
+  mouse        Boolean @default(true)
+  keyboard     Boolean @default(true)
+  clipboard    Boolean @default(true)
+  fileUpload   Boolean @default(false)
+  fileDownload Boolean @default(false)
+  fileDelete   Boolean @default(false)
+  audio        Boolean @default(false)
+  camera       Boolean @default(false)
+  microphone   Boolean @default(false)
+
+  /// Absolute paths the owner shared for file transfer. Empty = no file access.
+  sharedFolders String[] @default([])
+
+  updatedAt DateTime @updatedAt
+
+  @@map("device_permissions")
+}
+
+/// One-time code exchanged by the agent for permanent credentials.
+model EnrollmentCode {
+  id       String  @id @default(uuid()) @db.Uuid
+  code     String  @unique
+  deviceId String  @db.Uuid
+  device   Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime
+  usedAt    DateTime?
+  usedIp    String?
+  createdAt DateTime  @default(now())
+
+  @@index([expiresAt])
+  @@map("enrollment_codes")
+}
+
+model RemoteSession {
+  id        String @id @default(uuid()) @db.Uuid
+  /// Human-readable identifier, e.g. SES-2026-8F92A12
+  sessionId String @unique
+
+  userId   String @db.Uuid
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId String @db.Uuid
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  status SessionStatus @default(pending)
+
+  /// Snapshot of the capabilities authorized when the session was created, so
+  /// that later permission edits cannot silently widen a running session.
+  grantedCapabilities String[] @default([])
+  unattended          Boolean  @default(false)
+
+  /// Which capabilities actually became active during the session.
+  usedCamera     Boolean @default(false)
+  usedMicrophone Boolean @default(false)
+  usedAudio      Boolean @default(false)
+  usedClipboard  Boolean @default(false)
+  usedFiles      Boolean @default(false)
+
+  controllerIp String?
+  agentIp      String?
+  /// direct | relay | unknown - filled in from the selected ICE candidate pair.
+  connectionType String?
+  endReason      String?
+
+  requestedAt DateTime  @default(now())
+  startedAt   DateTime?
+  endedAt     DateTime?
+
+  auditLogs AuditLog[]
+
+  @@index([userId, requestedAt])
+  @@index([deviceId, requestedAt])
+  @@index([status])
+  @@map("remote_sessions")
+}
+
+model AuditLog {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String? @db.Uuid
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  deviceId String? @db.Uuid
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  sessionId String?        @db.Uuid
+  session   RemoteSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  action    String
+  ipAddress String?
+  userAgent String?
+  /// Structured context. Never contains passwords, tokens or file contents.
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([deviceId, createdAt])
+  @@index([sessionId])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}

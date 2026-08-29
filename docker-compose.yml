@@ -1,0 +1,101 @@
+# MineDesk development stack.
+#   docker compose up -d              # everything
+#   docker compose up -d postgres redis coturn   # infra only, run api/web on the host
+name: minedesk
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: minedesk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-minedesk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-minedesk}
+      POSTGRES_DB: ${POSTGRES_DB:-minedesk}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-minedesk} -d ${POSTGRES_DB:-minedesk}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: minedesk-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    container_name: minedesk-coturn
+    restart: unless-stopped
+    # host networking lets coturn see real client addresses; on Windows/macOS Docker
+    # Desktop this falls back to published ports (fine for LAN development).
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
+    volumes:
+      - ./infrastructure/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    container_name: minedesk-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: "4000"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-minedesk}:${POSTGRES_PASSWORD:-minedesk}@postgres:5432/${POSTGRES_DB:-minedesk}?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      AGENT_JWT_SECRET: ${AGENT_JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:5173}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:4000}
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-console}
+      STUN_SERVER: ${STUN_SERVER:-stun:localhost:3478}
+      TURN_SERVER: ${TURN_SERVER:-turn:localhost:3478}
+      TURN_STATIC_SECRET: ${TURN_STATIC_SECRET}
+      TURN_REALM: ${TURN_REALM:-minedesk.local}
+    ports:
+      - "4000:4000"
+    profiles: ["full"]
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:4000}
+    container_name: minedesk-web
+    restart: unless-stopped
+    depends_on: [api]
+    ports:
+      - "8080:80"
+    profiles: ["full"]
+
+volumes:
+  postgres-data:
+  redis-data:
