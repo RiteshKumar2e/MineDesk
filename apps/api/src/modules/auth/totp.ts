@@ -1,6 +1,6 @@
 import { authenticator } from 'otplib';
 import QRCode from 'qrcode';
-import { generateBackupCodes } from '@minedesk/shared';
+import { generateBackupCodes } from '@minedesk/shared/ids';
 import { hashToken, safeEqual } from '../../lib/crypto.js';
 
 /**

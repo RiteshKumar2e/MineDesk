@@ -70,8 +70,8 @@ export async function isDeviceOnline(deviceId: string): Promise<boolean> {
 export async function getPresenceMap(deviceIds: string[]): Promise<Map<string, PresenceRecord>> {
   const result = new Map<string, PresenceRecord>();
   if (deviceIds.length === 0) return result;
-  const values = await redis.mget(deviceIds.map((id) => REDIS_KEYS.devicePresence(id)));
-  values.forEach((raw, index) => {
+  const values: (string | null)[] = await redis.mget(deviceIds.map((id) => REDIS_KEYS.devicePresence(id)));
+  values.forEach((raw: string | null, index: number) => {
     const id = deviceIds[index];
     if (!raw || !id) return;
     try {

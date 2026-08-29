@@ -1,5 +1,6 @@
 import { AuditAction, ErrorCode } from '@minedesk/protocol';
-import { generateAgentSecret, grantedCapabilities, normalizeCode } from '@minedesk/shared';
+import { grantedCapabilities } from '@minedesk/shared';
+import { generateAgentSecret, normalizeCode } from '@minedesk/shared/ids';
 import type { FastifyInstance } from 'fastify';
 import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';

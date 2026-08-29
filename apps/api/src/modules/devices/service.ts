@@ -1,5 +1,6 @@
 import { AuditAction, ErrorCode } from '@minedesk/protocol';
-import { DEFAULT_PERMISSIONS, generateDeviceId, generateEnrollmentCode, normalizePermissions } from '@minedesk/shared';
+import { DEFAULT_PERMISSIONS, normalizePermissions } from '@minedesk/shared';
+import { generateDeviceId, generateEnrollmentCode } from '@minedesk/shared/ids';
 import type { PermissionSet, PublicDevice } from '@minedesk/types';
 import type { Device, DevicePermission, Prisma, RemoteSession } from '@prisma/client';
 import { recordAudit } from '../../lib/audit.js';

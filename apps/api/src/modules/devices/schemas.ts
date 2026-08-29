@@ -48,7 +48,7 @@ export const unattendedAccessSchema = z
     enabled: z.boolean(),
     password: z.string().min(10, 'Use at least 10 characters.').max(200).optional(),
   })
-  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+  .refine((value) => !value.enabled || typeof value.password === 'string', {
     message: 'A password is required to enable unattended access.',
     path: ['password'],
   });
