@@ -234,6 +234,37 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           // by connection id, which keeps the relay stateless.
           await hub.sendToSession(message.sessionId, message as ServerMessage);
 
+          // Only the agent's own accept/deny is authoritative - a controller
+          // cannot mark its own request accepted by forging the frame, because
+          // the connection sending it here IS the agent (checked below).
+          if (message.type === 'session:accept' && connection.role === 'agent') {
+            await prisma.remoteSession.updateMany({
+              where: { sessionId: message.sessionId, status: 'pending' },
+              data: { status: 'active', startedAt: new Date() },
+            });
+            await recordAudit({
+              userId: connection.userId,
+              deviceId: connection.deviceRowId,
+              action: AuditAction.SESSION_STARTED,
+              ipAddress: connection.ip,
+              metadata: { sessionId: message.sessionId },
+            });
+          }
+
+          if (message.type === 'session:deny' && connection.role === 'agent') {
+            await prisma.remoteSession.updateMany({
+              where: { sessionId: message.sessionId, status: 'pending' },
+              data: { status: 'denied', endedAt: new Date(), endReason: message.reason },
+            });
+            await recordAudit({
+              userId: connection.userId,
+              deviceId: connection.deviceRowId,
+              action: AuditAction.SESSION_DENIED,
+              ipAddress: connection.ip,
+              metadata: { sessionId: message.sessionId, reason: message.reason },
+            });
+          }
+
           if (message.type === 'session:end') {
             await prisma.remoteSession.updateMany({
               where: { sessionId: message.sessionId, status: { in: ['pending', 'active', 'reconnecting'] } },

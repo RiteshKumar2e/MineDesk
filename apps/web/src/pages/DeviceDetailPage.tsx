@@ -14,6 +14,7 @@ import {
   useSetUnattendedAccess,
   useUpdatePermissions,
 } from '../lib/deviceQueries';
+import { useCreateSession } from '../lib/sessionQueries';
 
 export default function DeviceDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -27,6 +28,7 @@ export default function DeviceDetailPage() {
   const setUnattended = useSetUnattendedAccess(id ?? '');
   const revokeDevice = useRevokeDevice(id ?? '');
   const issueCode = useIssueEnrollmentCode(id ?? '');
+  const createSession = useCreateSession();
 
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
@@ -90,6 +92,16 @@ export default function DeviceDetailPage() {
     setNewCode(res);
   }
 
+  async function handleConnect() {
+    setActionError(null);
+    try {
+      const res = await createSession.mutateAsync(device.deviceId);
+      navigate(`/remote/${res.sessionId}`);
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not start a session.');
+    }
+  }
+
   return (
     <div>
       <Link to="/devices" className="mb-4 inline-block text-sm text-slate-500 hover:underline">
@@ -141,10 +153,11 @@ export default function DeviceDetailPage() {
           <button
             type="button"
             className="btn-primary"
-            disabled={device.status !== 'online'}
+            disabled={device.status !== 'online' || createSession.isPending || Boolean(device.activeSession)}
             title={device.status !== 'online' ? 'Device must be online to connect' : undefined}
+            onClick={() => void handleConnect()}
           >
-            Connect
+            {createSession.isPending ? 'Connecting...' : device.activeSession ? 'Session active' : 'Connect'}
           </button>
           <button type="button" className="btn-danger" onClick={() => void handleDelete()}>
             Remove

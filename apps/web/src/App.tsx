@@ -8,6 +8,7 @@ import DevicesPage from './pages/DevicesPage';
 import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
+import RemoteSessionPage from './pages/RemoteSessionPage';
 import ResetPasswordPage from './pages/ResetPasswordPage';
 import SecurityPage from './pages/SecurityPage';
 import SettingsPage from './pages/SettingsPage';
@@ -47,6 +48,16 @@ export default function App() {
         <Route path="/security" element={<SecurityPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
+
+      {/* Full-screen: no dashboard chrome while a remote-control session is up. */}
+      <Route
+        path="/remote/:sessionId"
+        element={
+          <RequireAuth>
+            <RemoteSessionPage />
+          </RequireAuth>
+        }
+      />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

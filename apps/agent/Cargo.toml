@@ -1,0 +1,60 @@
+[package]
+name = "minedesk-agent"
+version = "0.1.0"
+edition = "2021"
+description = "MineDesk Remote Agent - authorized remote desktop access for Windows"
+default-run = "minedesk-agent"
+
+[[bin]]
+name = "minedesk-agent"
+path = "src/main.rs"
+
+# Release builds favor a small, fast single binary: the agent ships to end
+# users' machines, so startup time and footprint matter more than they would
+# for a server process.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies]
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "io-util", "signal"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+bytes = "1"
+
+# WebRTC: media transport (video track + reliable/unreliable data channels)
+webrtc = "0.11"
+
+# H.264 encoding for the screen-share video track. Downloads Cisco's prebuilt
+# OpenH264 binary at build time (BSD-licensed wrapper around a
+# separately-licensed codec binary - see openh264-sys2's README for the exact
+# terms before shipping this to end users).
+openh264 = { version = "0.6", features = ["source"] }
+
+[target.'cfg(windows)'.dependencies]
+# Official Microsoft-maintained Win32 bindings. Feature list is scoped to
+# exactly the APIs this agent calls: DXGI desktop duplication (screen
+# capture), Direct3D 11 (the staging texture DXGI hands frames back through),
+# SendInput (mouse/keyboard injection), and GetSystemMetrics (screen size).
+# Ctrl+Alt+Del (src/sas.rs) links directly against sas.dll rather than going
+# through this crate, since SendSAS is not part of its generated bindings.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
