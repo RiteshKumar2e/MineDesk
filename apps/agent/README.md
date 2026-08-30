@@ -1,22 +1,33 @@
 # MineDesk Remote Agent
 
 Windows-first Rust agent: screen capture (DXGI Desktop Duplication), H.264
-encoding (OpenH264), WebRTC media/data transport (`webrtc-rs`), and mouse/
-keyboard injection (`SendInput`). See the root `README.md` for how this fits
-into the rest of the platform.
+encoding (OpenH264), system-audio loopback capture (WASAPI) encoded to Opus,
+clipboard sync (`arboard`), file transfer, WebRTC media/data transport
+(`webrtc-rs`), and mouse/keyboard injection (`SendInput`). See the root
+`README.md` for how this fits into the rest of the platform.
 
 **This code has not been compiled in this environment** - the sandbox this
 was written in has no Rust toolchain installed. Everything below follows
-documented Win32/DXGI/webrtc-rs APIs carefully, but native FFI code like this
-routinely needs a round of real compiler feedback (crate version drift,
-exact method signatures) before it builds clean. Budget for that. The files
-most likely to need adjustment, in descending order of risk:
+documented Win32/DXGI/WASAPI/webrtc-rs APIs carefully, and every module was
+re-read at least once specifically hunting for the kind of mistake a
+compiler would catch, but that process is not a substitute for one. Budget
+for a round of real compiler feedback (crate version drift, exact method
+signatures) before this builds clean. Files most likely to need adjustment,
+in descending order of risk:
 
-1. `src/capture.rs` - DXGI/D3D11 FFI (out-parameter conventions can differ
-   slightly by `windows` crate version)
-2. `src/video.rs` - depends on `openh264`'s `YUVSource` trait shape
-3. `src/session.rs` - webrtc-rs closure/callback signatures
-4. everything else - ordinary async Rust (tokio, reqwest, serde), lower risk
+1. `src/audio.rs` - WASAPI/COM FFI (`IAudioClient`/`IAudioCaptureClient`
+   out-parameter conventions), plus its own explicitly-stated assumption that
+   the default output device's mix format is 32-bit float at a rate Opus
+   accepts natively - see that file's doc comment
+2. `src/capture.rs` - DXGI/D3D11 FFI (same class of risk as audio.rs, for
+   screen instead of sound)
+3. `src/video.rs` - depends on `openh264`'s `YUVSource` trait shape
+4. `src/session.rs` and `src/filetransfer.rs` - webrtc-rs closure/callback
+   and `RTCDataChannel` method signatures (`on_message`, `send`/`send_text`,
+   `buffered_amount`)
+5. `src/clipboard.rs` - low risk; `arboard`'s API is small and stable
+6. everything else - ordinary async Rust (tokio, reqwest, serde) or pure
+   logic with no FFI (`src/paths.rs`), lowest risk
 
 ## Prerequisites
 
@@ -113,9 +124,26 @@ These are honestly-scoped gaps, not oversights papered over:
   rather than recovering it. The signaling protocol already carries what a
   restart needs (`webrtc:offer.restart`), so this is wiring, not a redesign -
   tracked as Phase 6 in the root README.
-- **Clipboard sync and camera/microphone are not implemented** - `ClientFrame`/
-  `InputMessage` already have their variants defined; Phase 3 and Phase 4
-  work respectively.
+- **Camera and microphone are not implemented** - Phase 4 work. The
+  signaling protocol already has `capability:request`/`capability:response`
+  for the consent handshake this needs; the agent currently auto-declines
+  any `capability:request` it receives (see `main.rs`) rather than silently
+  ignoring it.
+- **Clipboard sync is polling-based, not event-driven** (`clipboard.rs`,
+  750ms interval) - see that file's doc comment for why
+  `AddClipboardFormatListener` (the real Win32 clipboard-change notification)
+  was not used, and what it would take to switch.
+- **Remote audio assumes a 32-bit-float mix format at a rate Opus accepts
+  natively** (`audio.rs`) - see that file's doc comment. A device that
+  doesn't match refuses to start audio rather than producing garbage, and the
+  session continues without it.
+- **File transfer is one transfer at a time per session**, by design (see
+  the protocol doc comment in `packages/protocol/src/filetransfer.ts`) - a
+  second upload/download while one is in flight is rejected, not queued.
+- **Multiple shared folders are exposed as named top-level entries** (by the
+  shared folder's own basename) rather than being merged into one browsable
+  tree - a controller always sees at least one extra directory level before
+  reaching actual shared content.
 - **Punctuation key mapping in `input.rs` assumes a US keyboard layout.**
   Letters, digits and control keys are layout-independent by virtue of using
   `KeyboardEvent.code`, but the OEM punctuation keys (`Minus`, `Equal`,

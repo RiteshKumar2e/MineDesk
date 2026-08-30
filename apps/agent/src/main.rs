@@ -10,9 +10,13 @@
 //! without changing anything below main.rs.
 
 mod api;
+mod audio;
 mod capture;
+mod clipboard;
 mod config;
+mod filetransfer;
 mod input;
+mod paths;
 mod protocol;
 mod sas;
 mod session;
@@ -377,9 +381,11 @@ async fn accept_session(
 
     let session_capabilities = SessionCapabilities::from_list(&effective_capabilities);
 
-    match session::start(session_id.clone(), ice_servers, session_capabilities, sender.clone()).await {
-        Ok((session, sdp, (width, height))) => {
-            let accept = ClientFrame::session_accept(session_id.clone(), session::primary_screen_info(width, height));
+    let shared_folders = agent_config.shared_folders.clone();
+
+    match session::start(session_id.clone(), ice_servers, session_capabilities, shared_folders, sender.clone()).await {
+        Ok((session, sdp, dimensions)) => {
+            let accept = ClientFrame::session_accept(session_id.clone(), session::primary_screen_info(dimensions));
             if let Err(err) = sender.lock().await.send(&accept).await {
                 warn!(error = %err, "failed to send session:accept");
             }

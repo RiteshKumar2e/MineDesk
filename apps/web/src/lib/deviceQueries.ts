@@ -61,7 +61,7 @@ export function useDeleteDevice() {
 export function useUpdatePermissions(id: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (permissions: Partial<PermissionSet>) =>
+    mutationFn: (permissions: Partial<PermissionSet> & { sharedFolders?: string[] }) =>
       api.put<{ device: PublicDevice; warnings: string[] }>(`/api/v1/devices/${id}/permissions`, permissions),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: deviceKeys.all });

@@ -216,7 +216,7 @@ fn now_ms() -> i64 {
 
 // -------------------------------------------------------- DataChannel input protocol
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum InputMessage {
     #[serde(rename = "mouse:move")]
@@ -239,10 +239,103 @@ pub enum InputMessage {
     ClipboardText { direction: String, text: String },
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
+}
+
+// -------------------------------------------------------- file transfer
+
+pub const FILE_CHANNEL: &str = "md-files";
+pub const FILE_CHUNK_SIZE: usize = 64 * 1024;
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FileEntry {
+    pub name: String,
+    #[serde(rename = "isDirectory")]
+    pub is_directory: bool,
+    pub size: u64,
+    #[serde(rename = "modifiedAt")]
+    pub modified_at: Option<i64>,
+}
+
+/// Control frames the agent receives on the `md-files` channel. Field names
+/// mirror `packages/protocol/src/filetransfer.ts` exactly.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum FileControlIn {
+    #[serde(rename = "file:list")]
+    FileList { #[serde(rename = "requestId")] request_id: String, path: String },
+    #[serde(rename = "file:mkdir")]
+    FileMkdir { #[serde(rename = "requestId")] request_id: String, path: String, name: String },
+    #[serde(rename = "file:rename")]
+    FileRename {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        path: String,
+        #[serde(rename = "newName")]
+        new_name: String,
+    },
+    #[serde(rename = "file:delete")]
+    FileDelete { #[serde(rename = "requestId")] request_id: String, path: String },
+    #[serde(rename = "upload:start")]
+    UploadStart {
+        #[serde(rename = "transferId")]
+        transfer_id: String,
+        path: String,
+        #[serde(rename = "fileName")]
+        file_name: String,
+        size: u64,
+    },
+    #[serde(rename = "upload:complete")]
+    UploadComplete { #[serde(rename = "transferId")] transfer_id: String },
+    #[serde(rename = "download:start")]
+    DownloadStart { #[serde(rename = "transferId")] transfer_id: String, path: String },
+    #[serde(rename = "transfer:cancel")]
+    TransferCancel { #[serde(rename = "transferId")] transfer_id: String },
+    #[serde(other)]
+    Unhandled,
+}
+
+/// Control frames the agent sends on the `md-files` channel.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum FileControlOut {
+    #[serde(rename = "file:list:result")]
+    FileListResult { #[serde(rename = "requestId")] request_id: String, path: String, entries: Vec<FileEntry> },
+    #[serde(rename = "file:ok")]
+    FileOk { #[serde(rename = "requestId")] request_id: String },
+    #[serde(rename = "file:error")]
+    FileError {
+        #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(rename = "transferId", skip_serializing_if = "Option::is_none")]
+        transfer_id: Option<String>,
+        code: String,
+        message: String,
+    },
+    #[serde(rename = "upload:ready")]
+    UploadReady { #[serde(rename = "transferId")] transfer_id: String },
+    #[serde(rename = "upload:finished")]
+    UploadFinished { #[serde(rename = "transferId")] transfer_id: String },
+    #[serde(rename = "download:info")]
+    DownloadInfo {
+        #[serde(rename = "transferId")]
+        transfer_id: String,
+        #[serde(rename = "fileName")]
+        file_name: String,
+        size: u64,
+    },
+    #[serde(rename = "download:complete")]
+    DownloadComplete { #[serde(rename = "transferId")] transfer_id: String },
+    #[serde(rename = "transfer:progress")]
+    TransferProgress {
+        #[serde(rename = "transferId")]
+        transfer_id: String,
+        #[serde(rename = "transferredBytes")]
+        transferred_bytes: u64,
+    },
 }

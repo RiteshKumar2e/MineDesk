@@ -52,13 +52,15 @@ impl InputInjector {
             }
             InputMessage::KeyDown { code } => self.key(code, false),
             InputMessage::KeyUp { code } => self.key(code, true),
-            // Shortcut (Ctrl+Alt+Del) is handled by session.rs via sas.rs - it
-            // is not an ordinary input event and must never be synthesized as
-            // three key presses (see the protocol doc comment for why).
+            // Both handled upstream in session.rs's wire_input_channel, before
+            // a message ever reaches this injector: Shortcut (Ctrl+Alt+Del)
+            // goes to sas.rs rather than being synthesized as three ordinary
+            // key presses (see the protocol doc comment for why), and
+            // ClipboardText{direction: "to-remote"} goes to clipboard.rs. Any
+            // instance reaching here is the other direction or an unmatched
+            // variant, and correctly has nothing for an *input injector* to do.
             InputMessage::Shortcut { .. } => {}
-            InputMessage::ClipboardText { .. } => {
-                // Clipboard sync ships in Phase 3.
-            }
+            InputMessage::ClipboardText { .. } => {}
         }
     }
 

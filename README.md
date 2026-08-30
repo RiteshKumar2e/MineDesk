@@ -10,12 +10,13 @@ no bypass of OS privacy permissions. Camera, microphone, screen, files and
 remote control all require explicit, revocable authorization, and the person
 at the remote machine always sees a visible indicator and a way to disconnect.
 
-This repository is being built in phases (see [Roadmap](#roadmap)). **Phase 1
-(Foundation, Authentication, Device Registration) and Phase 2 (Remote Agent,
-WebRTC screen/input streaming) are both in this commit.** Phase 2's Rust
-agent has not been compiled in the environment it was written in (no Rust
-toolchain available there) - see [Phase 2 status](#phase-2-status) below
-before relying on it.
+This repository is being built in phases (see [Roadmap](#roadmap)). **Phases
+1 through 3 are in this commit**: Foundation/Authentication/Device
+Registration, Remote Agent + WebRTC screen/input streaming, and now
+clipboard sync, remote audio, and file transfer. The Rust agent has not been
+compiled in the environment it was written in (no Rust toolchain available
+there) - see [Phase 2 status](#phase-2-status) below before relying on it;
+that section covers Phase 3's agent-side additions too.
 
 ## Architecture at a glance
 
@@ -133,29 +134,74 @@ docker-compose.yml
   Ctrl+C shuts the agent down cleanly, ending any session and telling the API
   the device is going offline
 
-**Not yet implemented** (later phases, per the task's phased plan): clipboard
-sync, remote audio, file transfer, camera/microphone, a native tray/window
-agent UI (console output stands in for it this phase), multi-monitor
-selection, and reconnection/ICE-restart after a network interruption.
+**Not yet implemented** (later phases, per the task's phased plan):
+camera/microphone, a native tray/window agent UI (console output stands in
+for it this phase), multi-monitor selection, and reconnection/ICE-restart
+after a network interruption.
+
+## What's implemented in Phase 3
+
+**Clipboard sync** - permission-gated like every other capability, carried
+over the same reliable DataChannel as keyboard/mouse (see
+`packages/protocol/src/datachannel.ts`'s `ClipboardText` message):
+- Controller to remote: Ctrl+V over the remote view sends the pasted text
+  directly (the native `paste` event, no permission prompt); a "Send
+  clipboard" button covers the case where a bare paste event doesn't fire
+- Remote to controller: the agent polls its local clipboard (`arboard`, every
+  750ms - see the known limitation below) and pushes a change to the
+  browser, which tries to write it to the OS clipboard automatically and
+  always shows a "click to copy" fallback toast, since browsers don't let a
+  page silently write to the clipboard outside a user gesture in every context
+
+**Remote audio** - the agent adds an Opus-encoded audio track (WASAPI
+loopback capture of whatever the machine is playing) to the same peer
+connection as the video track; the browser plays it through the existing
+`<video>` element and exposes mute + a volume slider, both gated behind the
+`audio` capability
+
+**File transfer** - a dedicated `md-files` DataChannel, one transfer at a
+time per session (see the protocol doc comment in
+`packages/protocol/src/filetransfer.ts` for why):
+- Owner configures one or more shared folders per device (new UI on the
+  device detail page); the file manager panel in `/remote/:sessionId`
+  browses them, with upload/download/rename/delete/new-folder gated
+  individually behind `fileUpload`/`fileDownload`/`fileDelete`
+- Progress, speed and ETA shown for the active transfer, with cancel; uploads
+  use `RTCDataChannel.bufferedAmount` for backpressure so a large file
+  doesn't get buffered wholesale in browser memory before the channel can
+  actually send it
+- Every path is validated on the agent by a Rust port of
+  `packages/shared/src/paths.ts`'s traversal guard (`apps/agent/src/paths.rs`)
+  before any filesystem call - the same rule set, hand-mirrored the same way
+  the wire protocol is
+
+**Not yet implemented**: camera/microphone (Phase 4), and everything else
+already listed as not yet implemented under Phase 2 above.
 
 ## Phase 2 status
 
-The TypeScript side of Phase 2 (the session-creation endpoint and the
-`/remote/:sessionId` page) is typechecked and built exactly like Phase 1 - see
+The TypeScript side of Phases 2 and 3 (the session-creation endpoint, the
+`/remote/:sessionId` page, the file manager panel, the shared-folders editor)
+is typechecked and built exactly like Phase 1 - see
 [Testing locally](#testing-locally).
 
 **The Rust agent is not.** It was written in a sandbox with no Rust, .NET or
 C++ toolchain installed, so unlike everything else in this repository it has
-not been through `cargo build` even once. The code follows documented Win32/
-DXGI/webrtc-rs APIs as carefully as hand-review allows, and three real bugs
-were caught and fixed by careful re-reading during that review (a data
-channel that hardcoded a capability check instead of using the session's
-actual granted permissions; a capture thread that `abort()` could not actually
-stop because it runs as blocking OS-thread work, which would have leaked a
-DXGI duplication handle and a D3D11 device on every session; and the agent
-never sending `session:join` before its first `session:accept`/`webrtc:offer`,
-which the signaling relay would have rejected outright) - but that process
-cannot substitute for a compiler. Before trusting it:
+not been through `cargo build` even once, across either phase. The code
+follows documented Win32/DXGI/WASAPI/webrtc-rs APIs as carefully as
+hand-review allows, and real bugs were caught and fixed by careful re-reading
+during that review rather than by a compiler - among them: a data channel
+that hardcoded a capability check instead of using the session's actual
+granted permissions; a capture thread that `abort()` could not actually stop
+because it runs as blocking OS-thread work, which would have leaked a DXGI
+duplication handle and a D3D11 device on every session; the agent never
+sending `session:join` before its first `session:accept`/`webrtc:offer`,
+which the signaling relay would have rejected outright; a WASAPI mix-format
+buffer freed before the one COM call that still needed it (use-after-free);
+and a directory listing that held its mutex guard across a disk-read
+`.await`, needlessly blocking other control messages for the duration. That
+process is real signal that this code was reviewed carefully, but it is not a
+substitute for a compiler. Before trusting any of it:
 
 ```bash
 cd apps/agent
@@ -163,11 +209,12 @@ cargo build --release
 ```
 
 expect to spend a little time on version-drift compile errors, concentrated
-in `src/capture.rs` (DXGI/D3D11 FFI) and `src/video.rs` (the `openh264` crate's
-exact trait shape) per `apps/agent/README.md`'s own risk ranking. Also see
-that file for what running as a normal console process (today) cannot do yet -
-true unattended access when nobody is logged in, and Ctrl+Alt+Del - both of
-which need Windows service mode, which is scoped but not built.
+in `src/audio.rs` and `src/capture.rs` (WASAPI/DXGI FFI) and `src/video.rs`
+(the `openh264` crate's exact trait shape) per `apps/agent/README.md`'s own
+risk ranking. Also see that file for what running as a normal console
+process (today) cannot do yet - true unattended access when nobody is
+logged in, and Ctrl+Alt+Del - both of which need Windows service mode, which
+is scoped but not built.
 
 One additional architectural gap worth knowing about even once the agent
 compiles: there is a race between the browser creating a session (which
@@ -349,9 +396,14 @@ and the frame parser are all wired correctly independent of the agent.
 
 ## Roadmap
 
-- **Phase 2** - Remote Agent (Rust, Windows-first), WebRTC screen/input
-  streaming, connect/disconnect from the browser
-- **Phase 3** - Clipboard sync, remote audio, file transfer
+- ~~**Phase 2** - Remote Agent (Rust, Windows-first), WebRTC screen/input
+  streaming, connect/disconnect from the browser~~ - built; see
+  [Phase 2 status](#phase-2-status) for what still needs a working Rust
+  toolchain to verify, plus the Windows-service and reconnect work explicitly
+  deferred to Phases 5/6.
+- ~~**Phase 3** - Clipboard sync, remote audio, file transfer~~ - built; see
+  [Phase 2 status](#phase-2-status) (covers Phase 3's agent code too) and
+  [What's implemented in Phase 3](#whats-implemented-in-phase-3).
 - **Phase 4** - Camera/microphone with consent prompts and always-on
   indicators
 - **Phase 5** - Deeper unattended-access management, access history, security

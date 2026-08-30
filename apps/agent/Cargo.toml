@@ -42,11 +42,21 @@ webrtc = "0.11"
 # terms before shipping this to end users).
 openh264 = { version = "0.6", features = ["source"] }
 
+# Opus encoding for the remote-audio track. audiopus_sys vendors and builds
+# libopus (BSD-licensed) from source, so no system package is required.
+audiopus = "0.3"
+
+# Cross-platform clipboard access - see src/clipboard.rs for why this is
+# preferred over hand-written Win32 clipboard FFI.
+arboard = "3"
+
 [target.'cfg(windows)'.dependencies]
 # Official Microsoft-maintained Win32 bindings. Feature list is scoped to
 # exactly the APIs this agent calls: DXGI desktop duplication (screen
 # capture), Direct3D 11 (the staging texture DXGI hands frames back through),
-# SendInput (mouse/keyboard injection), and GetSystemMetrics (screen size).
+# SendInput (mouse/keyboard injection), GetSystemMetrics (screen size), WASAPI
+# loopback capture (remote audio), and COM initialization (required once per
+# thread before any of the above COM-based APIs - DXGI, WASAPI - are used).
 # Ctrl+Alt+Del (src/sas.rs) links directly against sas.dll rather than going
 # through this crate, since SendSAS is not part of its generated bindings.
 windows = { version = "0.58", features = [
@@ -57,4 +67,8 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D11",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
 ] }

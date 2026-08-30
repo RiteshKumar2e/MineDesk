@@ -36,6 +36,7 @@ export default function DeviceDetailPage() {
   const [showUnattendedForm, setShowUnattendedForm] = useState(false);
   const [newCode, setNewCode] = useState<{ code: string; command: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [newFolder, setNewFolder] = useState('');
 
   if (isLoading) return <p className="text-sm text-slate-500">Loading device...</p>;
   if (error || !data) return <p className="text-sm text-red-600">That device could not be found.</p>;
@@ -48,6 +49,31 @@ export default function DeviceDetailPage() {
       await updatePermissions.mutateAsync({ [capability]: value });
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : 'Could not update permissions.');
+    }
+  }
+
+  async function addSharedFolder() {
+    const folder = newFolder.trim();
+    if (!folder) return;
+    setActionError(null);
+    try {
+      const current = data?.sharedFolders ?? [];
+      if (!current.includes(folder)) {
+        await updatePermissions.mutateAsync({ sharedFolders: [...current, folder] });
+      }
+      setNewFolder('');
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not add that folder.');
+    }
+  }
+
+  async function removeSharedFolder(folder: string) {
+    setActionError(null);
+    try {
+      const current = data?.sharedFolders ?? [];
+      await updatePermissions.mutateAsync({ sharedFolders: current.filter((f) => f !== folder) });
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not remove that folder.');
     }
   }
 
@@ -202,6 +228,40 @@ export default function DeviceDetailPage() {
                 </div>
               ))}
             </div>
+
+            {(device.permissions.fileUpload || device.permissions.fileDownload || device.permissions.fileDelete) && (
+              <div className="mt-5 border-t border-slate-100 pt-4 dark:border-slate-800">
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Shared folders</h3>
+                <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+                  Absolute paths on this computer the file manager is allowed to browse. Nothing outside these
+                  folders is reachable from a remote session.
+                </p>
+                <ul className="mb-2 space-y-1">
+                  {(data.sharedFolders ?? []).map((folder) => (
+                    <li key={folder} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1 text-sm dark:bg-slate-800">
+                      <span className="truncate font-mono text-xs">{folder}</span>
+                      <button type="button" className="text-xs text-red-600 hover:underline" onClick={() => void removeSharedFolder(folder)}>
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                  {(data.sharedFolders ?? []).length === 0 && (
+                    <li className="text-xs text-slate-400">No folders shared yet.</li>
+                  )}
+                </ul>
+                <div className="flex gap-2">
+                  <input
+                    className="input text-sm"
+                    placeholder="C:\Users\name\Documents"
+                    value={newFolder}
+                    onChange={(e) => setNewFolder(e.target.value)}
+                  />
+                  <button type="button" className="btn-secondary shrink-0" onClick={() => void addSharedFolder()}>
+                    Add
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
 
           <section className="card p-5">

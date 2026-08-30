@@ -1,7 +1,9 @@
 import {
   channelForInput,
+  FILE_CHANNEL,
   INPUT_CHANNEL_MOTION,
   INPUT_CHANNEL_RELIABLE,
+  parseInputMessage,
   parseServerMessage,
   PROTOCOL_VERSION,
   type InputMessage,
@@ -10,6 +12,7 @@ import {
 import type { IceServerConfig } from '@minedesk/types';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { FileManagerPanel } from '../components/FileManagerPanel';
 import { api, getAccessToken } from '../lib/apiClient';
 
 type SessionPhase =
@@ -89,6 +92,12 @@ export default function RemoteSessionPage() {
   const [phase, setPhase] = useState<SessionPhase>('loading');
   const [error, setError] = useState<string | null>(null);
   const [deviceLabel, setDeviceLabel] = useState<string>('');
+  const [capabilities, setCapabilities] = useState<string[]>([]);
+  const [showFiles, setShowFiles] = useState(false);
+  const [fileChannel, setFileChannel] = useState<RTCDataChannel | null>(null);
+  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [clipboardToast, setClipboardToast] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -99,6 +108,9 @@ export default function RemoteSessionPage() {
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const hasRemoteDescriptionRef = useRef(false);
   const endedRef = useRef(false);
+  const clipboardFromRemoteRef = useRef<string | null>(null);
+
+  const hasCapability = useCallback((name: string) => capabilities.includes(name), [capabilities]);
 
   const sendSignal = useCallback((message: Record<string, unknown>) => {
     const ws = wsRef.current;
@@ -117,6 +129,7 @@ export default function RemoteSessionPage() {
     pcRef.current?.close();
     wsRef.current?.close();
     if (videoRef.current) videoRef.current.srcObject = null;
+    setFileChannel(null);
   }, []);
 
   const handleDisconnect = useCallback(() => {
@@ -138,11 +151,12 @@ export default function RemoteSessionPage() {
       let iceServers: IceServerConfig[] = [];
       try {
         const res = await api.get<{
-          session: { status: string; device: { name: string } };
+          session: { status: string; device: { name: string }; capabilities: string[] };
           iceServers: IceServerConfig[];
         }>(`/api/v1/sessions/${sessionId}`);
         if (cancelled) return;
         setDeviceLabel(res.session.device.name);
+        setCapabilities(res.session.capabilities);
         iceServers = res.iceServers;
 
         if (res.session.status === 'ended') return setPhase('ended');
@@ -168,8 +182,24 @@ export default function RemoteSessionPage() {
 
       pc.ondatachannel = (event) => {
         const channel = event.channel;
-        if (channel.label === INPUT_CHANNEL_RELIABLE) reliableChannelRef.current = channel;
+        if (channel.label === INPUT_CHANNEL_RELIABLE) {
+          reliableChannelRef.current = channel;
+          // Clipboard updates from the remote machine arrive on this same
+          // channel (see channelForInput) - mouse/keyboard on it are strictly
+          // outbound, so this is the only inbound traffic to expect here.
+          channel.addEventListener('message', (e) => {
+            const message = parseInputMessage(String(e.data));
+            if (message?.type === 'clipboard:text' && message.direction === 'to-controller') {
+              void navigator.clipboard
+                .writeText(message.text)
+                .then(() => setClipboardToast('Copied from remote clipboard.'))
+                .catch(() => setClipboardToast('Remote clipboard changed - click to copy.'));
+              clipboardFromRemoteRef.current = message.text;
+            }
+          });
+        }
         if (channel.label === INPUT_CHANNEL_MOTION) motionChannelRef.current = channel;
+        if (channel.label === FILE_CHANNEL) setFileChannel(channel);
       };
 
       pc.oniceconnectionstatechange = () => {
@@ -273,6 +303,22 @@ export default function RemoteSessionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Applied imperatively rather than via <video> props: mute/volume are DOM
+  // element properties, not attributes React can bind directly for a stream
+  // that keeps playing across re-renders.
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.muted = muted;
+      videoRef.current.volume = volume;
+    }
+  }, [muted, volume]);
+
+  useEffect(() => {
+    if (!clipboardToast) return;
+    const timer = setTimeout(() => setClipboardToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [clipboardToast]);
+
   const sendInput = useCallback((input: InputMessage) => {
     const channel = channelForInput(input.type) === INPUT_CHANNEL_MOTION ? motionChannelRef.current : reliableChannelRef.current;
     if (channel && channel.readyState === 'open') {
@@ -324,6 +370,35 @@ export default function RemoteSessionPage() {
     sendInput({ type: 'key:up', code: e.code });
   }
 
+  // The native paste event gives clipboard text synchronously, without the
+  // async Clipboard API's permission prompt - the natural path for Ctrl+V.
+  function onPaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    if (!hasCapability('clipboard')) return;
+    const text = e.clipboardData.getData('text');
+    if (text) sendInput({ type: 'clipboard:text', direction: 'to-remote', text });
+  }
+
+  // Explicit button as a fallback for browsers/contexts where a bare paste
+  // event on a non-input element doesn't fire clipboard data.
+  async function handleSendClipboard() {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) sendInput({ type: 'clipboard:text', direction: 'to-remote', text });
+    } catch {
+      setError('Could not read the clipboard. Try pasting directly (Ctrl+V) instead.');
+    }
+  }
+
+  async function handleCopyReceivedClipboard() {
+    if (!clipboardFromRemoteRef.current) return;
+    try {
+      await navigator.clipboard.writeText(clipboardFromRemoteRef.current);
+      setClipboardToast(null);
+    } catch {
+      /* the toast stays visible so the user can retry */
+    }
+  }
+
   const isInteractive = phase === 'active';
 
   return (
@@ -347,6 +422,33 @@ export default function RemoteSessionPage() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {hasCapability('clipboard') && isInteractive && (
+            <button type="button" className="btn-secondary" onClick={() => void handleSendClipboard()} title="Send clipboard to remote">
+              {'\u{1F4CB} Send clipboard'}
+            </button>
+          )}
+          {hasCapability('audio') && (
+            <div className="flex items-center gap-1 rounded-lg bg-slate-800 px-2 py-1">
+              <button type="button" className="text-sm" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute' : 'Mute'}>
+                {muted ? '\u{1F507}' : '\u{1F50A}'}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={volume}
+                onChange={(e) => setVolume(Number(e.target.value))}
+                className="w-16"
+                aria-label="Remote audio volume"
+              />
+            </div>
+          )}
+          {(hasCapability('fileUpload') || hasCapability('fileDownload')) && (
+            <button type="button" className="btn-secondary" onClick={() => setShowFiles((v) => !v)}>
+              {'\u{1F4C1} Files'}
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary"
@@ -362,12 +464,23 @@ export default function RemoteSessionPage() {
         </div>
       </header>
 
+      {clipboardToast && (
+        <button
+          type="button"
+          onClick={() => void handleCopyReceivedClipboard()}
+          className="absolute right-4 top-14 z-10 rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-100 shadow-lg hover:bg-slate-700"
+        >
+          {clipboardToast}
+        </button>
+      )}
+
       <div
         ref={containerRef}
         className="relative flex flex-1 items-center justify-center overflow-hidden bg-black outline-none"
         tabIndex={0}
         onKeyDown={onKeyDown}
         onKeyUp={onKeyUp}
+        onPaste={onPaste}
       >
         {error && <p className="text-sm text-red-400">{error}</p>}
 
@@ -387,6 +500,16 @@ export default function RemoteSessionPage() {
           onWheel={isInteractive ? onWheel : undefined}
           onContextMenu={(e) => e.preventDefault()}
         />
+
+        {showFiles && (
+          <FileManagerPanel
+            channel={fileChannel}
+            canUpload={hasCapability('fileUpload')}
+            canDownload={hasCapability('fileDownload')}
+            canDelete={hasCapability('fileDelete')}
+            onClose={() => setShowFiles(false)}
+          />
+        )}
       </div>
     </div>
   );
