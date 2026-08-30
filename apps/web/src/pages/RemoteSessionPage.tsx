@@ -25,6 +25,11 @@ type SessionPhase =
   | 'ended'
   | 'failed';
 
+/** Camera/microphone go through their own request/response handshake with a
+ * human at the remote machine (see PROMPTED_CAPABILITIES) - this tracks
+ * where that handshake currently stands, independent of the session phase. */
+type CapabilityUiState = 'idle' | 'requesting' | 'active' | 'denied';
+
 const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:4000';
 
 const PHASE_LABEL: Record<SessionPhase, string> = {
@@ -98,8 +103,11 @@ export default function RemoteSessionPage() {
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [clipboardToast, setClipboardToast] = useState<string | null>(null);
+  const [cameraState, setCameraState] = useState<CapabilityUiState>('idle');
+  const [microphoneState, setMicrophoneState] = useState<CapabilityUiState>('idle');
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const cameraPreviewRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -109,6 +117,10 @@ export default function RemoteSessionPage() {
   const hasRemoteDescriptionRef = useRef(false);
   const endedRef = useRef(false);
   const clipboardFromRemoteRef = useRef<string | null>(null);
+  // requestId -> which capability it was asking for, so a capability:response
+  // can be matched to the right piece of UI state even if a second request
+  // (for the other capability) is issued before the first one answers.
+  const pendingCapabilityRequestsRef = useRef<Map<string, 'camera' | 'microphone'>>(new Map());
 
   const hasCapability = useCallback((name: string) => capabilities.includes(name), [capabilities]);
 
@@ -129,7 +141,11 @@ export default function RemoteSessionPage() {
     pcRef.current?.close();
     wsRef.current?.close();
     if (videoRef.current) videoRef.current.srcObject = null;
+    if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
     setFileChannel(null);
+    setCameraState('idle');
+    setMicrophoneState('idle');
+    pendingCapabilityRequestsRef.current.clear();
   }, []);
 
   const handleDisconnect = useCallback(() => {
@@ -175,9 +191,14 @@ export default function RemoteSessionPage() {
       pcRef.current = pc;
 
       pc.ontrack = (event) => {
-        if (videoRef.current && event.streams[0]) {
-          videoRef.current.srcObject = event.streams[0];
-        }
+        // Track IDs are set by the agent (see session.rs) specifically so
+        // they survive to here: "camera"/"microphone" share a preview
+        // element separate from the main "screen"/"audio" stream, so
+        // granting a camera mid-session can never clobber the screen view.
+        const isCameraOrMic = event.track.id === 'camera' || event.track.id === 'microphone';
+        const target = isCameraOrMic ? cameraPreviewRef.current : videoRef.current;
+        const stream = event.streams[0] ?? new MediaStream([event.track]);
+        if (target) target.srcObject = stream;
       };
 
       pc.ondatachannel = (event) => {
@@ -285,6 +306,35 @@ export default function RemoteSessionPage() {
             } else {
               pendingCandidatesRef.current.push(candidate);
             }
+            return;
+          }
+
+          case 'capability:response': {
+            const requested = pendingCapabilityRequestsRef.current.get(message.requestId);
+            if (!requested || requested !== message.capability) return;
+            pendingCapabilityRequestsRef.current.delete(message.requestId);
+
+            const setState = requested === 'camera' ? setCameraState : setMicrophoneState;
+            if (message.granted) {
+              setState('active');
+            } else {
+              setState('denied');
+              if (message.osDenied) {
+                setError(
+                  `The remote computer could not enable its ${requested} - it may be missing, in use, or blocked by the OS.`,
+                );
+              }
+            }
+            return;
+          }
+
+          case 'capability:state': {
+            // Authoritative snapshot from the agent - this is how a local
+            // stop (someone at the remote machine typing 'c'/'m') reaches
+            // the controller's UI, since that path never goes through
+            // capability:response at all.
+            setCameraState((current) => (message.camera ? 'active' : current === 'active' ? 'idle' : current));
+            setMicrophoneState((current) => (message.microphone ? 'active' : current === 'active' ? 'idle' : current));
             return;
           }
 
@@ -399,6 +449,19 @@ export default function RemoteSessionPage() {
     }
   }
 
+  function requestCapability(capability: 'camera' | 'microphone') {
+    const setState = capability === 'camera' ? setCameraState : setMicrophoneState;
+    const requestId = crypto.randomUUID();
+    pendingCapabilityRequestsRef.current.set(requestId, capability);
+    setState('requesting');
+    sendSignal({ type: 'capability:request', capability, requestId });
+  }
+
+  function stopCapability(capability: 'camera' | 'microphone') {
+    sendSignal({ type: 'capability:revoke', capability });
+    (capability === 'camera' ? setCameraState : setMicrophoneState)('idle');
+  }
+
   const isInteractive = phase === 'active';
 
   return (
@@ -426,6 +489,24 @@ export default function RemoteSessionPage() {
             <button type="button" className="btn-secondary" onClick={() => void handleSendClipboard()} title="Send clipboard to remote">
               {'\u{1F4CB} Send clipboard'}
             </button>
+          )}
+          {hasCapability('camera') && isInteractive && (
+            <CapabilityButton
+              label="Camera"
+              icon={'\u{1F4F7}'}
+              state={cameraState}
+              onRequest={() => requestCapability('camera')}
+              onStop={() => stopCapability('camera')}
+            />
+          )}
+          {hasCapability('microphone') && isInteractive && (
+            <CapabilityButton
+              label="Microphone"
+              icon={'\u{1F3A4}'}
+              state={microphoneState}
+              onRequest={() => requestCapability('microphone')}
+              onStop={() => stopCapability('microphone')}
+            />
           )}
           {hasCapability('audio') && (
             <div className="flex items-center gap-1 rounded-lg bg-slate-800 px-2 py-1">
@@ -510,7 +591,56 @@ export default function RemoteSessionPage() {
             onClose={() => setShowFiles(false)}
           />
         )}
+
+        {/* Camera and/or microphone from the remote machine. Never hidden:
+            this element and its red indicator are visible any time either
+            capability is active, matching the "always-on indicator, no
+            covert access" requirement - there is no mode where either
+            stream plays without this being on screen. */}
+        <div className={cameraState === 'active' || microphoneState === 'active' ? 'absolute bottom-4 left-4 w-56' : 'hidden'}>
+          <div className="overflow-hidden rounded-lg border-2 border-red-500 bg-black shadow-lg">
+            <video ref={cameraPreviewRef} autoPlay playsInline className="aspect-video w-full" />
+          </div>
+          <div className="mt-1 flex flex-wrap gap-2 text-xs font-medium text-red-400">
+            {cameraState === 'active' && <span>{'\u{1F534} Camera Active'}</span>}
+            {microphoneState === 'active' && <span>{'\u{1F534} Microphone Active'}</span>}
+          </div>
+        </div>
       </div>
     </div>
+  );
+}
+
+function CapabilityButton({
+  label,
+  icon,
+  state,
+  onRequest,
+  onStop,
+}: {
+  label: string;
+  icon: string;
+  state: CapabilityUiState;
+  onRequest: () => void;
+  onStop: () => void;
+}) {
+  if (state === 'active') {
+    return (
+      <button type="button" className="btn-secondary !bg-red-950 !text-red-300" onClick={onStop}>
+        {icon} Stop {label}
+      </button>
+    );
+  }
+  if (state === 'requesting') {
+    return (
+      <button type="button" className="btn-secondary" disabled>
+        Waiting for approval...
+      </button>
+    );
+  }
+  return (
+    <button type="button" className="btn-secondary" onClick={onRequest} title={`Request ${label.toLowerCase()} access`}>
+      {icon} {state === 'denied' ? `${label} declined - retry` : `Request ${label}`}
+    </button>
   );
 }

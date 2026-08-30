@@ -9,6 +9,7 @@
 //! front.
 
 use crate::audio::{AudioCapture, OpusEncoder};
+use crate::camera::CameraCapture;
 use crate::capture::ScreenCapture;
 use crate::clipboard::ClipboardSync;
 use crate::filetransfer::{FilePermissions, FileTransferHandler};
@@ -62,6 +63,15 @@ pub struct SessionCapabilities {
     pub file_upload: bool,
     pub file_download: bool,
     pub file_delete: bool,
+    /// Unlike the fields above, `camera`/`microphone` being true here means
+    /// only that the *owner's permission mask* allows requesting them for
+    /// this session - not that either is active. Each still needs its own
+    /// live, per-session approval at the remote machine (see
+    /// `grant_camera`/`grant_microphone`) before any device is opened. That
+    /// second gate is what `PROMPTED_CAPABILITIES` in
+    /// `packages/shared/src/permissions.ts` documents on the TypeScript side.
+    pub camera: bool,
+    pub microphone: bool,
 }
 
 impl SessionCapabilities {
@@ -76,6 +86,8 @@ impl SessionCapabilities {
             file_upload: has("fileUpload"),
             file_download: has("fileDownload"),
             file_delete: has("fileDelete"),
+            camera: has("camera"),
+            microphone: has("microphone"),
         }
     }
 }
@@ -83,8 +95,15 @@ impl SessionCapabilities {
 pub struct ActiveSession {
     pub session_id: String,
     peer_connection: Arc<RTCPeerConnection>,
+    capabilities: SessionCapabilities,
+    signaling: Arc<Mutex<SignalingSender>>,
     video: Option<CaptureHandle>,
     audio: Option<CaptureHandle>,
+    /// Populated only once camera/microphone have each gone through their own
+    /// live consent handshake - see `grant_camera`/`grant_microphone`. Both
+    /// start `None` even when `capabilities.camera`/`.microphone` are true.
+    camera: Option<CaptureHandle>,
+    microphone: Option<CaptureHandle>,
     file_transfer: Option<FileTransferHandler>,
     clipboard_sync: Option<ClipboardSync>,
 }
@@ -125,10 +144,36 @@ impl ActiveSession {
         if let Some(audio) = self.audio {
             audio.stop_and_join(&self.session_id, "audio").await;
         }
+        if let Some(camera) = self.camera {
+            camera.stop_and_join(&self.session_id, "camera").await;
+        }
+        if let Some(microphone) = self.microphone {
+            microphone.stop_and_join(&self.session_id, "microphone").await;
+        }
 
         if let Err(err) = self.peer_connection.close().await {
             warn!(error = %err, "error closing peer connection");
         }
+    }
+
+    /// Whether the *owner's* permission mask allows this session to ever ask
+    /// for the camera - independent of whether a live request has been made
+    /// or approved yet. Used by main.rs to decide whether an incoming
+    /// `capability:request` is even worth prompting a human about.
+    pub fn camera_allowed(&self) -> bool {
+        self.capabilities.camera
+    }
+
+    pub fn microphone_allowed(&self) -> bool {
+        self.capabilities.microphone
+    }
+
+    pub fn camera_active(&self) -> bool {
+        self.camera.is_some()
+    }
+
+    pub fn microphone_active(&self) -> bool {
+        self.microphone.is_some()
     }
 
     pub async fn add_ice_candidate(&self, candidate: String, sdp_mid: Option<String>, sdp_mline_index: Option<u16>) -> Result<()> {
@@ -149,6 +194,117 @@ impl ActiveSession {
             .set_remote_description(desc)
             .await
             .context("applying remote answer")
+    }
+
+    /// Turns the camera on for this session, if it isn't already.
+    ///
+    /// This is the last of two required gates - the caller (main.rs) has
+    /// already confirmed the owner's permission mask allows camera for this
+    /// device (`capabilities.camera`) *and* that a person at this machine
+    /// just explicitly approved this specific request. Neither gate alone is
+    /// enough: skipping either would mean either a compromised controller
+    /// could turn on a camera the owner never allowed, or a stale/forged
+    /// approval could turn one on without the mask actually permitting it.
+    ///
+    /// Adding a track after the initial offer/answer requires a fresh
+    /// offer/answer exchange (renegotiation) - the browser's existing
+    /// `webrtc:offer` handler already supports this without any special-casing
+    /// on that side, since renegotiating an established `RTCPeerConnection`
+    /// is just another `setRemoteDescription`/`createAnswer` cycle to it.
+    pub async fn grant_camera(&mut self) -> Result<()> {
+        anyhow::ensure!(self.capabilities.camera, "camera is not permitted for this session");
+        if self.camera.is_some() {
+            return Ok(()); // already on - a duplicate approval is a no-op, not an error
+        }
+
+        let camera_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability { mime_type: MIME_TYPE_H264.to_owned(), ..Default::default() },
+            "camera".to_owned(),
+            "minedesk-camera".to_owned(),
+        ));
+        self.peer_connection
+            .add_track(camera_track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+            .context("adding camera track")?;
+
+        let capture = tokio::task::spawn_blocking(CameraCapture::new)
+            .await
+            .context("camera init task panicked")??;
+        let stop = Arc::new(AtomicBool::new(false));
+        let task = spawn_camera_loop(capture, camera_track, self.session_id.clone(), stop.clone());
+        self.camera = Some(CaptureHandle { task, stop });
+
+        self.renegotiate().await?;
+        self.broadcast_capability_state().await;
+        Ok(())
+    }
+
+    pub async fn stop_camera(&mut self) {
+        if let Some(camera) = self.camera.take() {
+            camera.stop_and_join(&self.session_id, "camera").await;
+            self.broadcast_capability_state().await;
+        }
+    }
+
+    /// See `grant_camera`'s doc comment - the same two-gate reasoning applies
+    /// here for the microphone.
+    pub async fn grant_microphone(&mut self) -> Result<()> {
+        anyhow::ensure!(self.capabilities.microphone, "microphone is not permitted for this session");
+        if self.microphone.is_some() {
+            return Ok(());
+        }
+
+        let mic_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability { mime_type: MIME_TYPE_OPUS.to_owned(), clock_rate: 48000, ..Default::default() },
+            "microphone".to_owned(),
+            "minedesk-camera".to_owned(),
+        ));
+        self.peer_connection
+            .add_track(mic_track.clone() as Arc<dyn TrackLocal + Send + Sync>)
+            .await
+            .context("adding microphone track")?;
+
+        let capture = tokio::task::spawn_blocking(AudioCapture::microphone)
+            .await
+            .context("microphone init task panicked")??;
+        let stop = Arc::new(AtomicBool::new(false));
+        let task = spawn_audio_loop(capture, mic_track, self.session_id.clone(), stop.clone());
+        self.microphone = Some(CaptureHandle { task, stop });
+
+        self.renegotiate().await?;
+        self.broadcast_capability_state().await;
+        Ok(())
+    }
+
+    pub async fn stop_microphone(&mut self) {
+        if let Some(microphone) = self.microphone.take() {
+            microphone.stop_and_join(&self.session_id, "microphone").await;
+            self.broadcast_capability_state().await;
+        }
+    }
+
+    async fn renegotiate(&self) -> Result<()> {
+        let offer = self.peer_connection.create_offer(None).await.context("creating renegotiation offer")?;
+        self.peer_connection.set_local_description(offer.clone()).await.context("setting renegotiated local description")?;
+        self.signaling
+            .lock()
+            .await
+            .send(&ClientFrame::webrtc_offer(self.session_id.clone(), offer.sdp))
+            .await
+            .context("sending renegotiation offer")
+    }
+
+    async fn broadcast_capability_state(&self) {
+        let frame = ClientFrame::capability_state(
+            self.session_id.clone(),
+            self.camera.is_some(),
+            self.microphone.is_some(),
+            self.audio.is_some(),
+            self.video.is_some(),
+        );
+        if let Err(err) = self.signaling.lock().await.send(&frame).await {
+            warn!(session_id = %self.session_id, error = %err, "failed to broadcast capability state");
+        }
     }
 }
 
@@ -204,7 +360,7 @@ pub async fn start(
             "minedesk".to_owned(),
         ));
         match peer_connection.add_track(audio_track.clone() as Arc<dyn TrackLocal + Send + Sync>).await {
-            Ok(_) => match tokio::task::spawn_blocking(AudioCapture::new).await {
+            Ok(_) => match tokio::task::spawn_blocking(AudioCapture::loopback).await {
                 Ok(Ok(capture)) => {
                     let stop = Arc::new(AtomicBool::new(false));
                     let task = spawn_audio_loop(capture, audio_track, session_id.clone(), stop.clone());
@@ -283,7 +439,18 @@ pub async fn start(
     let sdp = offer.sdp.clone();
 
     Ok((
-        ActiveSession { session_id, peer_connection, video: video_handle, audio: audio_handle, file_transfer, clipboard_sync },
+        ActiveSession {
+            session_id,
+            peer_connection,
+            capabilities,
+            signaling,
+            video: video_handle,
+            audio: audio_handle,
+            camera: None,
+            microphone: None,
+            file_transfer,
+            clipboard_sync,
+        },
         sdp,
         dimensions,
     ))
@@ -348,10 +515,71 @@ fn spawn_video_loop(
     })
 }
 
-/// Pulls WASAPI loopback buffers (delivered roughly every 10ms, but not on a
-/// guaranteed cadence) and re-buffers them into fixed 20ms Opus frames before
-/// encoding, since Opus only accepts a handful of exact frame durations and
-/// WASAPI's delivery does not line up with them on its own.
+/// Same structure as `spawn_video_loop`, reading from the camera instead of
+/// the display. Kept as a separate function rather than a shared generic
+/// over "anything that produces `RawFrame`s" because the two loops' framing
+/// concerns already diverge slightly (DXGI's `next_frame` takes a poll
+/// timeout and can return "nothing new"; the camera's `next_frame` blocks
+/// until a frame is ready and always returns one) - a shared abstraction
+/// would need to paper over that difference rather than remove it.
+fn spawn_camera_loop(
+    mut capture: CameraCapture,
+    camera_track: Arc<TrackLocalStaticSample>,
+    session_id: String,
+    stop: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    const TARGET_FPS: u32 = 15;
+    let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
+
+    tokio::task::spawn_blocking(move || {
+        let (width, height) = capture.dimensions();
+        let mut encoder = match H264Encoder::new(width, height) {
+            Ok(e) => e,
+            Err(err) => {
+                error!(session_id = %session_id, error = %err, "failed to initialize camera H264 encoder");
+                return;
+            }
+        };
+
+        let rt = tokio::runtime::Handle::current();
+
+        while !stop.load(Ordering::Relaxed) {
+            let frame_start = std::time::Instant::now();
+
+            match capture.next_frame() {
+                Ok(frame) => match encoder.encode_bgra(&frame) {
+                    Ok(nal_bytes) if !nal_bytes.is_empty() => {
+                        let track = camera_track.clone();
+                        let sample = Sample { data: Bytes::from(nal_bytes), duration: frame_duration, ..Default::default() };
+                        if let Err(err) = rt.block_on(track.write_sample(&sample)) {
+                            warn!(session_id = %session_id, error = %err, "failed to write camera sample");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => warn!(session_id = %session_id, error = %err, "H264 encode failed for this camera frame"),
+                },
+                Err(err) => {
+                    error!(session_id = %session_id, error = %err, "camera capture failed, stopping camera loop");
+                    break;
+                }
+            }
+
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_duration {
+                std::thread::sleep(frame_duration - elapsed);
+            }
+        }
+    })
+}
+
+/// Shared by both remote-audio (loopback) and microphone: pulls WASAPI
+/// buffers (delivered roughly every 10ms, but not on a guaranteed cadence)
+/// and re-buffers them into fixed 20ms Opus frames before encoding, since
+/// Opus only accepts a handful of exact frame durations and WASAPI's
+/// delivery does not line up with them on its own. Which of the two audio
+/// sources this is capturing was already decided by the caller, in how the
+/// `AudioCapture` it passes in was constructed (`::loopback()` vs
+/// `::microphone()`) - this function does not know or care which.
 fn spawn_audio_loop(
     capture: AudioCapture,
     audio_track: Arc<TrackLocalStaticSample>,

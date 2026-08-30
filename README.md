@@ -11,12 +11,13 @@ remote control all require explicit, revocable authorization, and the person
 at the remote machine always sees a visible indicator and a way to disconnect.
 
 This repository is being built in phases (see [Roadmap](#roadmap)). **Phases
-1 through 3 are in this commit**: Foundation/Authentication/Device
-Registration, Remote Agent + WebRTC screen/input streaming, and now
-clipboard sync, remote audio, and file transfer. The Rust agent has not been
-compiled in the environment it was written in (no Rust toolchain available
-there) - see [Phase 2 status](#phase-2-status) below before relying on it;
-that section covers Phase 3's agent-side additions too.
+1 through 4 are in this commit**: Foundation/Authentication/Device
+Registration, Remote Agent + WebRTC screen/input streaming, clipboard sync +
+remote audio + file transfer, and now camera/microphone with a live consent
+prompt and an always-on indicator. The Rust agent has not been compiled in
+the environment it was written in (no Rust toolchain available there) - see
+[Phase 2 status](#phase-2-status) below before relying on it; that section
+covers every later phase's agent-side additions too.
 
 ## Architecture at a glance
 
@@ -175,33 +176,72 @@ time per session (see the protocol doc comment in
   before any filesystem call - the same rule set, hand-mirrored the same way
   the wire protocol is
 
-**Not yet implemented**: camera/microphone (Phase 4), and everything else
-already listed as not yet implemented under Phase 2 above.
+**Not yet implemented as of Phase 3**: camera/microphone, addressed below.
+
+## What's implemented in Phase 4
+
+**Camera and microphone**, each gated by two independent checks before
+anything opens - the owner's permission mask (`camera`/`microphone` in
+`DevicePermission`, off by default) *and* a live, per-session approval by
+whoever is at the remote machine:
+
+- Controller clicks "Request Camera" (or Microphone) in `/remote/:sessionId`,
+  which sends `capability:request` over the *signaling* socket (not a data
+  channel - this negotiation predates there being any media to carry)
+- The agent prints "The controller is requesting your CAMERA. Allow? [y/N]"
+  at the console, with the same 30-second-then-deny behavior as a session
+  invite; there is no code path that grants either capability without this
+  prompt, and no default-allow
+- On approval, the agent opens the device (real camera/microphone access
+  through the same OS capture APIs any other application would use - the
+  hardware privacy light and Windows' in-use indicator behave exactly as
+  they would for a video-call app), adds a new track to the *existing*
+  peer connection, and renegotiates - the browser's already-in-place
+  `webrtc:offer` handling from Phase 2 needed no changes to support this
+- The browser shows a small preview panel with a `\u{1F534}` "Camera Active"
+  and/or "Microphone Active" label the entire time either is active - not a
+  one-time toast, and not something the controller can dismiss out from
+  under the indicator - plus a "Stop" button that sends a new
+  `capability:revoke` message
+- The person at the remote machine can independently stop either at any time
+  by typing `c` or `m` at the agent's console, which reaches the browser as a
+  `capability:state` broadcast - the same message a controller-initiated stop
+  produces, so the UI can't tell (and doesn't need to tell) who stopped it
+
+**Not yet implemented**: a native tray/notification-window indicator (console
+output stands in, as documented since Phase 2), device selection when more
+than one camera/microphone exists, and actually removing the WebRTC track on
+stop rather than just halting capture - see `apps/agent/README.md`'s Known
+Limitations for the reasoning on that last one.
 
 ## Phase 2 status
 
-The TypeScript side of Phases 2 and 3 (the session-creation endpoint, the
-`/remote/:sessionId` page, the file manager panel, the shared-folders editor)
-is typechecked and built exactly like Phase 1 - see
-[Testing locally](#testing-locally).
+The TypeScript side of Phases 2 through 4 (the session-creation endpoint, the
+`/remote/:sessionId` page, the file manager panel, the shared-folders editor,
+the camera/microphone request UI) is typechecked and built exactly like
+Phase 1 - see [Testing locally](#testing-locally).
 
 **The Rust agent is not.** It was written in a sandbox with no Rust, .NET or
 C++ toolchain installed, so unlike everything else in this repository it has
-not been through `cargo build` even once, across either phase. The code
-follows documented Win32/DXGI/WASAPI/webrtc-rs APIs as carefully as
-hand-review allows, and real bugs were caught and fixed by careful re-reading
-during that review rather than by a compiler - among them: a data channel
-that hardcoded a capability check instead of using the session's actual
-granted permissions; a capture thread that `abort()` could not actually stop
-because it runs as blocking OS-thread work, which would have leaked a DXGI
+not been through `cargo build` even once, across any phase. The code follows
+documented Win32/DXGI/WASAPI/webrtc-rs APIs as carefully as hand-review
+allows, and real bugs were caught and fixed by careful re-reading during that
+review rather than by a compiler - among them: a data channel that
+hardcoded a capability check instead of using the session's actual granted
+permissions; a capture thread that `abort()` could not actually stop because
+it runs as blocking OS-thread work, which would have leaked a DXGI
 duplication handle and a D3D11 device on every session; the agent never
 sending `session:join` before its first `session:accept`/`webrtc:offer`,
 which the signaling relay would have rejected outright; a WASAPI mix-format
 buffer freed before the one COM call that still needed it (use-after-free);
-and a directory listing that held its mutex guard across a disk-read
-`.await`, needlessly blocking other control messages for the duration. That
-process is real signal that this code was reviewed carefully, but it is not a
-substitute for a compiler. Before trusting any of it:
+a directory listing that held its mutex guard across a disk-read `.await`,
+needlessly blocking other control messages for the duration; a motion data
+channel that hardcoded its capability check to always-true regardless of the
+session's actual granted permissions; and - the clearest sign this review
+genuinely can't substitute for a compiler - `main.rs`'s central frame-handling
+`match` was not exhaustive for two full phases (`ServerFrame::SessionState`
+had no arm), which `cargo build` would have refused outright as its very
+first error. Before trusting any of it:
 
 ```bash
 cd apps/agent
@@ -209,12 +249,13 @@ cargo build --release
 ```
 
 expect to spend a little time on version-drift compile errors, concentrated
-in `src/audio.rs` and `src/capture.rs` (WASAPI/DXGI FFI) and `src/video.rs`
-(the `openh264` crate's exact trait shape) per `apps/agent/README.md`'s own
-risk ranking. Also see that file for what running as a normal console
-process (today) cannot do yet - true unattended access when nobody is
-logged in, and Ctrl+Alt+Del - both of which need Windows service mode, which
-is scoped but not built.
+in `src/audio.rs` (WASAPI, shared by loopback and microphone capture),
+`src/capture.rs` (DXGI), `src/camera.rs` (`nokhwa`'s exact API shape) and
+`src/video.rs` (the `openh264` crate's exact trait shape) per
+`apps/agent/README.md`'s own risk ranking. Also see that file for what
+running as a normal console process (today) cannot do yet - true unattended
+access when nobody is logged in, and Ctrl+Alt+Del - both of which need
+Windows service mode, which is scoped but not built.
 
 One additional architectural gap worth knowing about even once the agent
 compiles: there is a race between the browser creating a session (which
@@ -364,6 +405,13 @@ test:watch` while iterating.
    session hangs at "waiting for approval" with an online, unattended device,
    see the [known invite race](#phase-2-status) above before assuming
    something else is broken.
+8. With `camera`/`microphone` enabled in the device's permissions, click
+   **Request Camera** - the agent's console should print a y/n prompt; typing
+   `y` there should bring up a small red-bordered preview panel in the
+   browser within a couple of seconds (a fresh renegotiation, so expect a
+   brief pause). Typing `c` at the agent's console, or clicking **Stop
+   Camera** in the browser, should make the "Camera Active" indicator
+   disappear on both ends.
 
 ### 5. Exercising the signaling socket directly
 
@@ -404,8 +452,8 @@ and the frame parser are all wired correctly independent of the agent.
 - ~~**Phase 3** - Clipboard sync, remote audio, file transfer~~ - built; see
   [Phase 2 status](#phase-2-status) (covers Phase 3's agent code too) and
   [What's implemented in Phase 3](#whats-implemented-in-phase-3).
-- **Phase 4** - Camera/microphone with consent prompts and always-on
-  indicators
+- ~~**Phase 4** - Camera/microphone with consent prompts and always-on
+  indicators~~ - built; see [What's implemented in Phase 4](#whats-implemented-in-phase-4).
 - **Phase 5** - Deeper unattended-access management, access history, security
   hardening pass
 - **Phase 6** - TURN in production, reconnection/ICE-restart handling,

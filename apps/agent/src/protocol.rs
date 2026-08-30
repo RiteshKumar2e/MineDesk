@@ -73,6 +73,12 @@ pub enum ServerFrame {
         #[serde(rename = "requestId")]
         request_id: String,
     },
+    #[serde(rename = "capability:revoke")]
+    CapabilityRevoke {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        capability: String,
+    },
     #[serde(rename = "error")]
     Error { code: String, message: String },
     /// Frames this agent doesn't need to act on (e.g. it echoes its own
@@ -158,6 +164,16 @@ pub enum ClientFrame {
         #[serde(rename = "osDenied")]
         os_denied: bool,
     },
+    #[serde(rename = "capability:state")]
+    CapabilityState {
+        v: u8,
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        camera: bool,
+        microphone: bool,
+        audio: bool,
+        screen: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -204,6 +220,21 @@ impl ClientFrame {
 
     pub fn webrtc_ice(session_id: String, candidate: String, sdp_mid: Option<String>, sdp_mline_index: Option<u16>) -> Self {
         ClientFrame::WebrtcIce { v: PROTOCOL_VERSION, session_id, candidate, sdp_mid, sdp_mline_index }
+    }
+
+    pub fn capability_response(
+        session_id: String,
+        request_id: String,
+        capability: String,
+        granted: bool,
+        scope: &'static str,
+        os_denied: bool,
+    ) -> Self {
+        ClientFrame::CapabilityResponse { v: PROTOCOL_VERSION, session_id, request_id, capability, granted, scope, os_denied }
+    }
+
+    pub fn capability_state(session_id: String, camera: bool, microphone: bool, audio: bool, screen: bool) -> Self {
+        ClientFrame::CapabilityState { v: PROTOCOL_VERSION, session_id, camera, microphone, audio, screen }
     }
 }
 

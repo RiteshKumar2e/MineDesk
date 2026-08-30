@@ -1,32 +1,43 @@
 # MineDesk Remote Agent
 
-Windows-first Rust agent: screen capture (DXGI Desktop Duplication), H.264
-encoding (OpenH264), system-audio loopback capture (WASAPI) encoded to Opus,
-clipboard sync (`arboard`), file transfer, WebRTC media/data transport
-(`webrtc-rs`), and mouse/keyboard injection (`SendInput`). See the root
-`README.md` for how this fits into the rest of the platform.
+Windows-first Rust agent: screen and camera capture (DXGI Desktop Duplication
+and `nokhwa`), H.264 encoding (OpenH264), system-audio and microphone capture
+(WASAPI) encoded to Opus, clipboard sync (`arboard`), file transfer, WebRTC
+media/data transport (`webrtc-rs`), and mouse/keyboard injection
+(`SendInput`). See the root `README.md` for how this fits into the rest of
+the platform.
 
 **This code has not been compiled in this environment** - the sandbox this
 was written in has no Rust toolchain installed. Everything below follows
 documented Win32/DXGI/WASAPI/webrtc-rs APIs carefully, and every module was
 re-read at least once specifically hunting for the kind of mistake a
-compiler would catch, but that process is not a substitute for one. Budget
-for a round of real compiler feedback (crate version drift, exact method
-signatures) before this builds clean. Files most likely to need adjustment,
-in descending order of risk:
+compiler would catch, but that process is not a substitute for one - the
+clearest evidence of that is `main.rs`'s frame-handling `match` genuinely
+failed to cover every `ServerFrame` variant (`session:state` was missing)
+across two earlier phases before this review caught it; a real compiler
+would have refused to build on day one. Budget for a round of real compiler
+feedback (crate version drift, exact method signatures) before this builds
+clean. Files most likely to need adjustment, in descending order of risk:
 
 1. `src/audio.rs` - WASAPI/COM FFI (`IAudioClient`/`IAudioCaptureClient`
    out-parameter conventions), plus its own explicitly-stated assumption that
-   the default output device's mix format is 32-bit float at a rate Opus
-   accepts natively - see that file's doc comment
+   the mix format is 32-bit float at a rate Opus accepts natively - see that
+   file's doc comment. Shared by remote-audio (loopback) and microphone
+   capture, so a fix here fixes both.
 2. `src/capture.rs` - DXGI/D3D11 FFI (same class of risk as audio.rs, for
    screen instead of sound)
-3. `src/video.rs` - depends on `openh264`'s `YUVSource` trait shape
-4. `src/session.rs` and `src/filetransfer.rs` - webrtc-rs closure/callback
+3. `src/camera.rs` - depends on `nokhwa`'s exact `Camera`/`RequestedFormat`
+   API for the installed version; conceptually simple (open, read a frame,
+   convert RGB to BGRA) but the crate's surface has shifted across versions
+4. `src/video.rs` - depends on `openh264`'s `YUVSource` trait shape
+5. `src/session.rs` and `src/filetransfer.rs` - webrtc-rs closure/callback
    and `RTCDataChannel` method signatures (`on_message`, `send`/`send_text`,
-   `buffered_amount`)
-5. `src/clipboard.rs` - low risk; `arboard`'s API is small and stable
-6. everything else - ordinary async Rust (tokio, reqwest, serde) or pure
+   `buffered_amount`), plus (session.rs only) whatever `create_offer`/
+   `add_track` require for a *second* negotiation on an already-connected
+   `RTCPeerConnection` - the renegotiation path camera/microphone use is
+   exercised nowhere else in this codebase
+6. `src/clipboard.rs` - low risk; `arboard`'s API is small and stable
+7. everything else - ordinary async Rust (tokio, reqwest, serde) or pure
    logic with no FFI (`src/paths.rs`), lowest risk
 
 ## Prerequisites
@@ -68,8 +79,13 @@ MineDesk Agent
 Device ID: RMT-8F32-A91C
 Unattended access: Disabled
 Status: online
-(type 'd' + Enter to disconnect the current session, 'q' + Enter to quit)
+(type 'd' to disconnect, 'c'/'m' to stop camera/microphone, 'q' to quit - each followed by Enter)
 Incoming session request from Ada Lovelace <ada@example.com>. Accept? [y/N] (30s to respond)
+y
+Status: session active
+The controller is requesting your CAMERA. Allow? [y/N] (30s to respond)
+y
+Status: session active - camera active
 ```
 
 Ctrl+C shuts it down exactly like typing `q`: any active session is ended
@@ -124,11 +140,24 @@ These are honestly-scoped gaps, not oversights papered over:
   rather than recovering it. The signaling protocol already carries what a
   restart needs (`webrtc:offer.restart`), so this is wiring, not a redesign -
   tracked as Phase 6 in the root README.
-- **Camera and microphone are not implemented** - Phase 4 work. The
-  signaling protocol already has `capability:request`/`capability:response`
-  for the consent handshake this needs; the agent currently auto-declines
-  any `capability:request` it receives (see `main.rs`) rather than silently
-  ignoring it.
+- **Camera/microphone consent is console-based**, same as session invites -
+  "The controller is requesting your CAMERA. Allow? [y/N]" printed to the
+  terminal, 30 seconds to answer, defaulting to deny. A real always-visible,
+  non-closable overlay (matching the mockup in the root design doc) is the
+  same tray/window UI gap noted above, not a separate piece of work.
+- **Stopping camera/microphone doesn't renegotiate the track away.** `stop_camera`/
+  `stop_microphone` (`session.rs`) halt the capture loop so no more frames are
+  sent, but leave the already-negotiated WebRTC track and transceiver in
+  place rather than removing it via a second renegotiation. This avoids a
+  class of renegotiation edge cases (glare between two offers, re-adding a
+  track after removal) for a real, working cost: on the wire the track goes
+  silent rather than disappearing, which the browser's UI accounts for by
+  tracking activity through `capability:state` rather than track lifecycle
+  events. Re-granting the *same* capability again within one session resumes
+  the existing track's capture loop rather than re-negotiating from scratch.
+- **Only the default camera and default microphone/speaker are ever opened.**
+  Device selection (letting the owner or controller pick among several
+  cameras or mics) is not implemented.
 - **Clipboard sync is polling-based, not event-driven** (`clipboard.rs`,
   750ms interval) - see that file's doc comment for why
   `AddClipboardFormatListener` (the real Win32 clipboard-change notification)

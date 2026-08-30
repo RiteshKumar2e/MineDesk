@@ -1,28 +1,33 @@
-//! System audio ("what this computer plays") capture via WASAPI loopback,
-//! encoded to Opus for the WebRTC audio track.
+//! WASAPI audio capture, encoded to Opus for a WebRTC audio track. Two
+//! sources share this one implementation:
 //!
-//! This is the highest-FFI-risk file added in this phase, for the same
-//! reason `capture.rs` was in Phase 2: it drives Windows COM interfaces
+//!   - **Loopback** ("what this computer plays", Phase 3's remote audio):
+//!     opens the default *render* (speaker) endpoint with
+//!     `AUDCLNT_STREAMFLAGS_LOOPBACK`, which hands back a copy of whatever
+//!     that endpoint is mixing rather than actually capturing a microphone.
+//!   - **Microphone** (Phase 4, explicitly consented per session - see
+//!     `session.rs::grant_microphone`): opens the default *capture* endpoint
+//!     with no special flags, i.e. an ordinary recording stream. This is a
+//!     real microphone activation and goes through the OS's own privacy
+//!     surface exactly like any other application recording audio would - it
+//!     is not a way around the microphone privacy indicator Windows shows.
+//!
+//! This is one of the highest-FFI-risk files in the agent, for the same
+//! reason `capture.rs` is: it drives Windows COM interfaces
 //! (`IMMDeviceEnumerator`, `IAudioClient`, `IAudioCaptureClient`) directly.
-//! The pattern below - open the default render endpoint, activate an
-//! `IAudioClient` with `AUDCLNT_STREAMFLAGS_LOOPBACK`, pull buffers on a
-//! timer - is the standard, well-documented way to capture what a Windows
-//! machine is playing without an application cooperating; it is not a
-//! roundabout way to do something users wouldn't expect. What plays through
-//! the speakers is exactly what the controller hears, nothing more.
 //!
 //! Known simplifying assumption, stated plainly rather than silently baked
 //! in: the endpoint's shared-mode mix format is assumed to be 32-bit float
 //! PCM at a sample rate Opus accepts natively (8/12/16/24/48 kHz - in
-//! practice this is 48 kHz on the overwhelming majority of Windows installs).
-//! A device with an unusual mix format is refused with a clear error rather
-//! than silently producing noise; full format negotiation and resampling is
-//! future work.
+//! practice this is 48 kHz on the overwhelming majority of Windows installs
+//! and devices). A device with an unusual mix format is refused with a clear
+//! error rather than silently producing noise; full format negotiation and
+//! resampling is future work.
 
 use anyhow::{bail, Context, Result};
 use windows::core::Interface;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
@@ -30,6 +35,14 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 /// One 10ms WASAPI buffer period; small enough to keep audio latency low
 /// without polling so tightly that it wastes CPU.
 const BUFFER_DURATION_HNS: i64 = 100_000; // 10ms in 100-nanosecond units
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AudioSource {
+    /// The default playback device, opened in loopback mode.
+    SystemLoopback,
+    /// The default recording device (an actual microphone), opened normally.
+    Microphone,
+}
 
 pub struct AudioCapture {
     client: IAudioClient,
@@ -39,11 +52,19 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
+    pub fn loopback() -> Result<Self> {
+        Self::open(AudioSource::SystemLoopback)
+    }
+
+    pub fn microphone() -> Result<Self> {
+        Self::open(AudioSource::Microphone)
+    }
+
     /// Must be called on the same OS thread that will subsequently call
     /// `next_samples` - COM apartments and the interfaces obtained here are
     /// thread-affine in the way this code uses them (STA-like usage on a
     /// dedicated thread, matching `capture.rs`'s approach for DXGI).
-    pub fn new() -> Result<Self> {
+    fn open(source: AudioSource) -> Result<Self> {
         unsafe {
             // Idempotent-enough for this agent's lifetime: this is the only
             // thread that touches COM, and it never calls CoUninitialize
@@ -52,9 +73,11 @@ impl AudioCapture {
 
             let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
                 .context("creating IMMDeviceEnumerator")?;
+            let data_flow = if source == AudioSource::Microphone { eCapture } else { eRender };
+            let endpoint_kind = if source == AudioSource::Microphone { "recording" } else { "playback" };
             let device = enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
-                .context("getting the default playback device - is anything set as the default output?")?;
+                .GetDefaultAudioEndpoint(data_flow, eConsole)
+                .with_context(|| format!("getting the default {endpoint_kind} device - is one set as default?"))?;
             let client: IAudioClient = device.Activate(CLSCTX_ALL, None).context("activating IAudioClient")?;
 
             let mix_format = client.GetMixFormat().context("getting the device's mix format")?;
@@ -80,11 +103,16 @@ impl AudioCapture {
                 bail!("unsupported mix format: {sample_rate} Hz is not a rate Opus accepts natively");
             }
 
-            let init_result = client.Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, BUFFER_DURATION_HNS, 0, mix_format, None);
+            let stream_flags = if source == AudioSource::SystemLoopback {
+                AUDCLNT_STREAMFLAGS_LOOPBACK
+            } else {
+                windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS(0)
+            };
+            let init_result = client.Initialize(AUDCLNT_SHAREMODE_SHARED, stream_flags, BUFFER_DURATION_HNS, 0, mix_format, None);
             // GetMixFormat allocates with CoTaskMemAlloc; the caller owns it,
             // and nothing after this point still needs the pointer.
             windows::Win32::System::Com::CoTaskMemFree(Some(mix_format as *const _ as *const std::ffi::c_void));
-            init_result.context("initializing IAudioClient in loopback mode")?;
+            init_result.context("initializing IAudioClient")?;
 
             let capture_client: IAudioCaptureClient = client.GetService().context("getting IAudioCaptureClient")?;
             client.Start().context("starting audio capture")?;

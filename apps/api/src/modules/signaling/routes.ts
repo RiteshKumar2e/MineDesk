@@ -218,7 +218,8 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
         case 'session:end':
         case 'capability:request':
         case 'capability:response':
-        case 'capability:state': {
+        case 'capability:state':
+        case 'capability:revoke': {
           if (!connection.sessions.has(message.sessionId)) {
             send({
               v: PROTOCOL_VERSION,

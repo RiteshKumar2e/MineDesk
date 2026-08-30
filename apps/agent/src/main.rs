@@ -3,14 +3,20 @@
 //! This is a console application for the Phase 2 MVP rather than the tray/
 //! window UI sketched in the project's design doc - it prints the same
 //! information (device ID, online status, unattended-access state, current
-//! session) as plain status lines, and accepts typing "d" then Enter to
-//! disconnect the active session, or "q" then Enter to quit. A native tray
-//! icon with the same controls is planned but out of scope for this phase;
-//! see `apps/agent/README.md` for exactly what that would take to add
-//! without changing anything below main.rs.
+//! session, and now camera/microphone activity) as plain status lines, and
+//! accepts single-letter commands followed by Enter: "d" disconnects the
+//! active session, "c" stops an active camera stream, "m" stops an active
+//! microphone stream, and "q" quits. The same line is also how a person
+//! answers a pending y/n prompt (a session invite, or a camera/microphone
+//! request) when one is outstanding - see `PendingPrompt` below. A native
+//! tray icon and a proper non-closable "recording" indicator window are
+//! planned but out of scope for this phase; see `apps/agent/README.md` for
+//! exactly what that would take to add without changing anything below
+//! main.rs.
 
 mod api;
 mod audio;
+mod camera;
 mod capture;
 mod clipboard;
 mod config;
@@ -136,7 +142,7 @@ async fn run() -> Result<()> {
         if auth.unattended_access_enabled { "Enabled" } else { "Disabled" }
     );
     println!("Status: connecting...");
-    println!("(type 'd' + Enter to disconnect the current session, 'q' + Enter to quit)");
+    println!("(type 'd' to disconnect, 'c'/'m' to stop camera/microphone, 'q' to quit - each followed by Enter)");
 
     let (sender, mut inbound) = signaling::connect(&auth.signal_url, &auth.token)
         .await
@@ -160,17 +166,18 @@ async fn run() -> Result<()> {
 
     let mut heartbeat_interval = tokio::time::interval(Duration::from_millis(auth.heartbeat_interval_ms));
     let mut active: Option<ActiveSession> = None;
-    // (session_id, capabilities) for an invite awaiting a y/n answer at this
-    // console, plus the deadline it lapses at if nobody responds.
-    let mut pending_invite: Option<(String, Vec<String>)> = None;
-    let mut invite_deadline: Option<tokio::time::Instant> = None;
+    // At most one console y/n prompt is ever outstanding at a time - either a
+    // session invite or a camera/microphone request, never both - matching
+    // this phase's single-active-session console UI (see module doc comment).
+    let mut pending_prompt: Option<PendingPrompt> = None;
+    let mut prompt_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         // A `select!` branch is only polled when its guard is true, so this
         // sleep future is inert (never constructed) whenever there is no
-        // invite waiting - it does not spin or wake the loop needlessly.
-        let invite_timeout = async {
-            match invite_deadline {
+        // prompt waiting - it does not spin or wake the loop needlessly.
+        let prompt_timeout = async {
+            match prompt_deadline {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -197,11 +204,12 @@ async fn run() -> Result<()> {
                 }
             }
 
-            _ = invite_timeout, if invite_deadline.is_some() => {
-                invite_deadline = None;
-                if let Some((session_id, _capabilities)) = pending_invite.take() {
-                    println!("No response - declining. Status: online");
-                    let _ = sender.lock().await.send(&ClientFrame::session_deny(session_id, "user_declined")).await;
+            _ = prompt_timeout, if prompt_deadline.is_some() => {
+                prompt_deadline = None;
+                if let Some(prompt) = pending_prompt.take() {
+                    println!("No response - declining.");
+                    deny_prompt(&sender, prompt).await;
+                    print_status(&active);
                 }
             }
 
@@ -220,18 +228,19 @@ async fn run() -> Result<()> {
             }
 
             Some(line) = stdin_rx.recv() => {
-                // While an invite is waiting, any line at all is read as the
-                // answer to it - not as a "d"/"q" command - so a person
-                // cannot accidentally disconnect a *different* session while
-                // trying to answer a fresh prompt.
-                if let Some((session_id, capabilities)) = pending_invite.take() {
-                    invite_deadline = None;
+                // While a prompt is waiting, any line at all is read as the
+                // answer to it - not as a "d"/"c"/"m"/"q" command - so a
+                // person cannot accidentally disconnect a session or stop a
+                // capability while trying to answer a fresh prompt.
+                if let Some(prompt) = pending_prompt.take() {
+                    prompt_deadline = None;
                     if line == "y" {
-                        accept_session(&sender, &mut active, session_id, capabilities, &agent_config).await;
+                        approve_prompt(&sender, &mut active, prompt, &agent_config).await;
                     } else {
-                        println!("Declined. Status: online");
-                        let _ = sender.lock().await.send(&ClientFrame::session_deny(session_id, "user_declined")).await;
+                        println!("Declined.");
+                        deny_prompt(&sender, prompt).await;
                     }
+                    print_status(&active);
                     continue;
                 }
 
@@ -242,10 +251,28 @@ async fn run() -> Result<()> {
                             let session_id = session.session_id.clone();
                             session.close().await;
                             let _ = sender.lock().await.send(&ClientFrame::session_end(session_id, "local_user_terminated")).await;
-                            println!("Status: online");
                         } else {
                             println!("No active session.");
                         }
+                        print_status(&active);
+                    }
+                    "c" => {
+                        if let Some(session) = active.as_mut().filter(|s| s.camera_active()) {
+                            println!("Stopping camera...");
+                            session.stop_camera().await;
+                        } else {
+                            println!("Camera is not active.");
+                        }
+                        print_status(&active);
+                    }
+                    "m" => {
+                        if let Some(session) = active.as_mut().filter(|s| s.microphone_active()) {
+                            println!("Stopping microphone...");
+                            session.stop_microphone().await;
+                        } else {
+                            println!("Microphone is not active.");
+                        }
+                        print_status(&active);
                     }
                     "q" => {
                         if let Some(session) = active.take() {
@@ -287,13 +314,14 @@ async fn run() -> Result<()> {
                         if unattended {
                             println!("Incoming session from {} <{}> (unattended access) - accepting.", controller.name, controller.email);
                             accept_session(&sender, &mut active, session_id, capabilities, &agent_config).await;
+                            print_status(&active);
                         } else {
                             println!(
                                 "Incoming session request from {} <{}>. Accept? [y/N] (30s to respond)",
                                 controller.name, controller.email
                             );
-                            pending_invite = Some((session_id, capabilities));
-                            invite_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                            pending_prompt = Some(PendingPrompt::SessionInvite { session_id, capabilities });
+                            prompt_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
                         }
                     }
 
@@ -302,7 +330,8 @@ async fn run() -> Result<()> {
                             if let Some(session) = active.take() {
                                 session.close().await;
                             }
-                            println!("Session ended. Status: online");
+                            println!("Session ended.");
+                            print_status(&active);
                         }
                     }
 
@@ -323,25 +352,59 @@ async fn run() -> Result<()> {
                     }
 
                     ServerFrame::CapabilityRequest { session_id, capability, request_id } => {
-                        // Camera/microphone consent prompts ship in Phase 4;
-                        // for now the agent is truthful about not supporting
-                        // them rather than silently ignoring the request.
-                        let _ = sender.lock().await.send(&ClientFrame::CapabilityResponse {
-                            v: protocol::PROTOCOL_VERSION,
-                            session_id,
-                            request_id,
-                            capability,
-                            granted: false,
-                            scope: "once",
-                            os_denied: false,
-                        }).await;
+                        let Some(session) = active.as_ref().filter(|s| s.session_id == session_id) else {
+                            continue; // no session, or a request for a different one - ignore rather than guess
+                        };
+
+                        let allowed_by_owner = match capability.as_str() {
+                            "camera" => session.camera_allowed(),
+                            "microphone" => session.microphone_allowed(),
+                            // audio/clipboard are granted automatically at session
+                            // start (see session.rs) rather than prompted per
+                            // request, so there is nothing to prompt for here.
+                            _ => false,
+                        };
+
+                        if !allowed_by_owner {
+                            let response = ClientFrame::capability_response(session_id, request_id, capability, false, "once", false);
+                            let _ = sender.lock().await.send(&response).await;
+                            continue;
+                        }
+
+                        let label = if capability == "camera" { "CAMERA" } else { "MICROPHONE" };
+                        println!("The controller is requesting your {label}. Allow? [y/N] (30s to respond)");
+                        pending_prompt = Some(PendingPrompt::CapabilityRequest { session_id, request_id, capability });
+                        prompt_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(30));
+                    }
+
+                    ServerFrame::CapabilityRevoke { session_id, capability } => {
+                        if let Some(session) = active.as_mut().filter(|s| s.session_id == session_id) {
+                            match capability.as_str() {
+                                "camera" if session.camera_active() => {
+                                    println!("Controller stopped the camera.");
+                                    session.stop_camera().await;
+                                }
+                                "microphone" if session.microphone_active() => {
+                                    println!("Controller stopped the microphone.");
+                                    session.stop_microphone().await;
+                                }
+                                _ => {}
+                            }
+                            print_status(&active);
+                        }
                     }
 
                     ServerFrame::Error { code, message } => {
                         warn!(code = %code, message = %message, "server reported an error");
                     }
 
-                    ServerFrame::HelloAck { .. } | ServerFrame::HeartbeatAck { .. } | ServerFrame::Unhandled => {}
+                    // session:state is informational for the controller's UI;
+                    // the agent already knows its own session's status from
+                    // its own state transitions and has nothing to act on here.
+                    ServerFrame::HelloAck { .. }
+                    | ServerFrame::HeartbeatAck { .. }
+                    | ServerFrame::SessionState { .. }
+                    | ServerFrame::Unhandled => {}
                 }
             }
         }
@@ -393,12 +456,91 @@ async fn accept_session(
             if let Err(err) = sender.lock().await.send(&offer).await {
                 warn!(error = %err, "failed to send webrtc:offer");
             }
-            println!("Status: session active");
             *active = Some(session);
         }
         Err(err) => {
             error!(error = %err, "failed to start session");
             let _ = sender.lock().await.send(&ClientFrame::session_deny(session_id, "policy")).await;
         }
+    }
+}
+
+/// A console y/n prompt awaiting a response - either a session invite or a
+/// camera/microphone request. main.rs's event loop holds at most one of
+/// these at a time (see its module doc comment for why a single-session
+/// console UI makes that the right constraint rather than a limitation).
+enum PendingPrompt {
+    SessionInvite { session_id: String, capabilities: Vec<String> },
+    CapabilityRequest { session_id: String, request_id: String, capability: String },
+}
+
+async fn approve_prompt(
+    sender: &Arc<Mutex<SignalingSender>>,
+    active: &mut Option<ActiveSession>,
+    prompt: PendingPrompt,
+    agent_config: &api::AgentConfigResponse,
+) {
+    match prompt {
+        PendingPrompt::SessionInvite { session_id, capabilities } => {
+            accept_session(sender, active, session_id, capabilities, agent_config).await;
+        }
+        PendingPrompt::CapabilityRequest { session_id, request_id, capability } => {
+            let Some(session) = active.as_mut().filter(|s| s.session_id == session_id) else {
+                return; // the session ended while the prompt was awaiting an answer
+            };
+
+            // A real failure here (no camera attached, the OS itself refusing
+            // access) is reported as osDenied so the controller's UI can tell
+            // "no one answered" apart from "said yes, but it didn't work" -
+            // and, per the module doc comment on grant_camera/grant_microphone,
+            // this is never papered over by pretending it succeeded.
+            let result = if capability == "camera" { session.grant_camera().await } else { session.grant_microphone().await };
+
+            let (granted, os_denied) = match result {
+                Ok(()) => (true, false),
+                Err(err) => {
+                    warn!(error = %err, capability = %capability, "failed to activate requested capability");
+                    (false, true)
+                }
+            };
+
+            let response = ClientFrame::capability_response(session_id, request_id, capability, granted, "session", os_denied);
+            if let Err(err) = sender.lock().await.send(&response).await {
+                warn!(error = %err, "failed to send capability:response");
+            }
+        }
+    }
+}
+
+async fn deny_prompt(sender: &Arc<Mutex<SignalingSender>>, prompt: PendingPrompt) {
+    match prompt {
+        PendingPrompt::SessionInvite { session_id, .. } => {
+            let _ = sender.lock().await.send(&ClientFrame::session_deny(session_id, "user_declined")).await;
+        }
+        PendingPrompt::CapabilityRequest { session_id, request_id, capability } => {
+            let response = ClientFrame::capability_response(session_id, request_id, capability, false, "once", false);
+            let _ = sender.lock().await.send(&response).await;
+        }
+    }
+}
+
+fn print_status(active: &Option<ActiveSession>) {
+    let Some(session) = active else {
+        println!("Status: online");
+        return;
+    };
+
+    let mut extras = Vec::new();
+    if session.camera_active() {
+        extras.push("camera active");
+    }
+    if session.microphone_active() {
+        extras.push("microphone active");
+    }
+
+    if extras.is_empty() {
+        println!("Status: session active");
+    } else {
+        println!("Status: session active - {}", extras.join(", "));
     }
 }

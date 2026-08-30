@@ -210,6 +210,23 @@ export const CapabilityStateMessage = z.object({
   screen: z.boolean(),
 });
 
+/**
+ * Controller -> agent: stop an active camera/microphone stream.
+ *
+ * The person at the remote machine can always stop it locally too (that path
+ * never goes through this message at all) - this is the symmetric case of
+ * the controller, who asked for it, deciding they no longer need it. The
+ * agent still gets the final say: it is free to also just physically remove
+ * the device, unplug it, or otherwise make this moot, same as it always
+ * could.
+ */
+export const CapabilityRevokeMessage = z.object({
+  ...base,
+  type: z.literal('capability:revoke'),
+  sessionId,
+  capability: z.enum(['camera', 'microphone']),
+});
+
 // -------------------------------------------------------------------- error
 
 export const ErrorMessage = z.object({
@@ -237,6 +254,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   CapabilityRequestMessage,
   CapabilityResponseMessage,
   CapabilityStateMessage,
+  CapabilityRevokeMessage,
 ]);
 
 /** Frames the server may send to a client. */
@@ -255,6 +273,7 @@ export const ServerMessage = z.discriminatedUnion('type', [
   CapabilityRequestMessage,
   CapabilityResponseMessage,
   CapabilityStateMessage,
+  CapabilityRevokeMessage,
   ErrorMessage,
 ]);
 

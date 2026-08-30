@@ -50,6 +50,12 @@ audiopus = "0.3"
 # preferred over hand-written Win32 clipboard FFI.
 arboard = "3"
 
+# Camera capture (Media Foundation backend on Windows) - preferred over
+# hand-written Media Foundation COM for the same reason arboard and openh264
+# are preferred over hand-rolled equivalents: a well-scoped wrapper for a
+# well-understood job, not a place to spend this project's FFI risk budget.
+nokhwa = { version = "0.10", features = ["input-native"] }
+
 [target.'cfg(windows)'.dependencies]
 # Official Microsoft-maintained Win32 bindings. Feature list is scoped to
 # exactly the APIs this agent calls: DXGI desktop duplication (screen
