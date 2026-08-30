@@ -16,10 +16,12 @@ Registration, Remote Agent + WebRTC screen/input streaming, clipboard sync +
 remote audio + file transfer, camera/microphone with a live consent prompt
 and an always-on indicator, a real unattended-access password plus genuine
 access history, and now the invite race fixed plus signaling reconnect and
-ICE restart. The Rust agent has not been compiled in the environment it was
-written in (no Rust toolchain available there) - see
-[Phase 2 status](#phase-2-status) below before relying on it; that section
-covers every later phase's agent-side additions too.
+ICE restart. The Rust agent has since been compiled and verified against a
+real toolchain: `cargo check`, `cargo build`, and `cargo build --release`
+all succeed and produce a working `minedesk-agent.exe` - see
+[Phase 2 status](#phase-2-status) below for exactly what that verification
+did and did not cover before relying on it; that section covers every later
+phase's agent-side additions too.
 
 ## Architecture at a glance
 
@@ -318,41 +320,58 @@ The TypeScript side of Phases 2 through 6 (the session-creation endpoint, the
 the camera/microphone request UI) is typechecked and built exactly like
 Phase 1 - see [Testing locally](#testing-locally).
 
-**The Rust agent is not.** It was written in a sandbox with no Rust, .NET or
-C++ toolchain installed, so unlike everything else in this repository it has
-not been through `cargo build` even once, across any phase. The code follows
-documented Win32/DXGI/WASAPI/webrtc-rs APIs as carefully as hand-review
-allows, and real bugs were caught and fixed by careful re-reading during that
-review rather than by a compiler - among them: a data channel that
-hardcoded a capability check instead of using the session's actual granted
-permissions; a capture thread that `abort()` could not actually stop because
-it runs as blocking OS-thread work, which would have leaked a DXGI
-duplication handle and a D3D11 device on every session; the agent never
-sending `session:join` before its first `session:accept`/`webrtc:offer`,
-which the signaling relay would have rejected outright; a WASAPI mix-format
-buffer freed before the one COM call that still needed it (use-after-free);
-a directory listing that held its mutex guard across a disk-read `.await`,
-needlessly blocking other control messages for the duration; a motion data
-channel that hardcoded its capability check to always-true regardless of the
-session's actual granted permissions; and - the clearest sign this review
-genuinely can't substitute for a compiler - `main.rs`'s central frame-handling
-`match` was not exhaustive for two full phases (`ServerFrame::SessionState`
-had no arm), which `cargo build` would have refused outright as its very
-first error. Before trusting any of it:
+**The Rust agent now has been, too.** It was originally written in a sandbox
+with no Rust, .NET or C++ toolchain installed, so for several phases it had
+never been through `cargo build` even once. A real toolchain (rustup
+stable-x86_64-pc-windows-msvc, VS 2019 Build Tools, Windows SDK, CMake) was
+since set up and used to actually compile it. Before that, real bugs were
+caught and fixed by careful re-reading rather than by a compiler - among
+them: a data channel that hardcoded a capability check instead of using the
+session's actual granted permissions; a capture thread that `abort()` could
+not actually stop because it runs as blocking OS-thread work, which would
+have leaked a DXGI duplication handle and a D3D11 device on every session;
+the agent never sending `session:join` before its first
+`session:accept`/`webrtc:offer`, which the signaling relay would have
+rejected outright; a WASAPI mix-format buffer freed before the one COM call
+that still needed it (use-after-free); a directory listing that held its
+mutex guard across a disk-read `.await`, needlessly blocking other control
+messages for the duration; a motion data channel that hardcoded its
+capability check to always-true regardless of the session's actual granted
+permissions; and - the clearest sign that review alone can't substitute for
+a compiler - `main.rs`'s central frame-handling `match` was not exhaustive
+for two full phases (`ServerFrame::SessionState` had no arm), which
+`cargo build` refused outright as one of its first errors once actually run.
+
+Running the real compiler surfaced 29 more genuine errors on the first pass
+- wrong FFI out-parameter shapes in `capture.rs`/`audio.rs`, `openh264`'s and
+`nokhwa`'s actual trait/method names differing from the hand-written guesses
+in `video.rs`, a Win32 flags constant that turned out to be a plain `u32`
+rather than a newtype in `audio.rs`/`capture.rs`, and a few borrow/move and
+`Option`-wrapping mismatches in `filetransfer.rs`/`sas.rs`/`input.rs` - all
+now fixed. It also caught one more real runtime bug via a dead-code warning:
+`session.rs` was calling the wrong clipboard-write path for
+controller-to-remote text, which would have echoed those writes straight
+back to the controller as a spurious "new" clipboard change; fixed by
+sharing one `ClipboardSync` instance between the outgoing poller and the
+inbound handler. Both `cargo check` and `cargo build --release` now succeed
+with exit code 0:
 
 ```bash
 cd apps/agent
 cargo build --release
 ```
 
-expect to spend a little time on version-drift compile errors, concentrated
-in `src/audio.rs` (WASAPI, shared by loopback and microphone capture),
-`src/capture.rs` (DXGI), `src/camera.rs` (`nokhwa`'s exact API shape) and
-`src/video.rs` (the `openh264` crate's exact trait shape) per
-`apps/agent/README.md`'s own risk ranking. Also see that file for what
-running as a normal console process (today) cannot do yet - true unattended
-access when nobody is logged in, and Ctrl+Alt+Del - both of which need
-Windows service mode, which is scoped but not built.
+produces a working `target/release/minedesk-agent.exe`, confirmed to run and
+respond correctly to `--help`, `enroll --help`, and a bare `run` with no
+enrollment present. **What this verification does not cover**: actual
+runtime behavior against a live server and real hardware - real screen
+capture from a GPU, a real WebRTC negotiation against the signaling hub, and
+real camera/microphone devices have not been exercised, only compilation,
+linking, and CLI-level smoke tests. See `apps/agent/README.md` for the full
+list of genuinely-remaining gaps (Windows service mode - needed for true
+unattended access when nobody is logged in, and for Ctrl+Alt+Del - tray/
+window UI, multi-monitor support, and others), none of which are
+compile-risk items anymore.
 
 ~~One additional architectural gap worth knowing about even once the agent
 compiles: there is a race between the browser creating a session and the
@@ -531,7 +550,10 @@ and the frame parser are all wired correctly independent of the agent.
 
 ## Known limitations
 
-- The Remote Agent has not been compiled - see [Phase 2 status](#phase-2-status).
+- The Remote Agent compiles and links (`cargo check`/`cargo build`/
+  `cargo build --release` all pass) and its CLI runs correctly, but full
+  end-to-end runtime behavior against a live server and real hardware is
+  still unverified - see [Phase 2 status](#phase-2-status).
 - Email delivery defaults to logging the message to the console
   (`MAIL_TRANSPORT=console`); set `MAIL_TRANSPORT=smtp` and the `SMTP_*`
   variables for real delivery.

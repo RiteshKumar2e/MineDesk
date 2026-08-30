@@ -18,15 +18,16 @@
 //!     automatically rather than surfacing the error to the caller.
 
 use anyhow::{Context, Result};
-use windows::Win32::Foundation::{HANDLE, HMODULE};
+use windows::core::Interface;
+use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
     D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, DXGI_ERROR_ACCESS_LOST,
+    IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST,
     DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -105,7 +106,7 @@ impl ScreenCapture {
         Ok(result)
     }
 
-    fn copy_frame(&self, resource: windows::core::IUnknown) -> Result<RawFrame> {
+    fn copy_frame(&self, resource: IDXGIResource) -> Result<RawFrame> {
         let acquired: ID3D11Texture2D = resource.cast().context("acquired frame was not a Texture2D")?;
 
         let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -115,7 +116,7 @@ impl ScreenCapture {
             Usage: D3D11_USAGE_STAGING,
             BindFlags: Default::default(),
             CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-            MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+            MiscFlags: 0,
             ..desc
         };
 
@@ -197,8 +198,7 @@ fn duplicate_output(device: &ID3D11Device, output: &IDXGIOutput1) -> Result<(IDX
          or this session cannot access the desktop (e.g. running on the secure desktop)",
     )?;
 
-    let mut desc = Default::default();
-    unsafe { duplication.GetDesc(&mut desc) };
+    let desc = unsafe { duplication.GetDesc() };
 
     Ok((duplication, desc.ModeDesc.Width, desc.ModeDesc.Height))
 }

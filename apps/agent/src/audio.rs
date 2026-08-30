@@ -25,7 +25,6 @@
 //! resampling is future work.
 
 use anyhow::{bail, Context, Result};
-use windows::core::Interface;
 use windows::Win32::Media::Audio::{
     eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -103,11 +102,11 @@ impl AudioCapture {
                 bail!("unsupported mix format: {sample_rate} Hz is not a rate Opus accepts natively");
             }
 
-            let stream_flags = if source == AudioSource::SystemLoopback {
-                AUDCLNT_STREAMFLAGS_LOOPBACK
-            } else {
-                windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS(0)
-            };
+            // Stream flags are a plain u32 bitmask in this crate version, not
+            // a dedicated flags type - AUDCLNT_STREAMFLAGS_LOOPBACK is itself
+            // just a `u32` constant, and "no flags" for microphone capture is
+            // simply 0.
+            let stream_flags: u32 = if source == AudioSource::SystemLoopback { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
             let init_result = client.Initialize(AUDCLNT_SHAREMODE_SHARED, stream_flags, BUFFER_DURATION_HNS, 0, mix_format, None);
             // GetMixFormat allocates with CoTaskMemAlloc; the caller owns it,
             // and nothing after this point still needs the pointer.

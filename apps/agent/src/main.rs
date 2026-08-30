@@ -247,7 +247,16 @@ async fn run() -> Result<()> {
         tokio::select! {
             _ = heartbeat_interval.tick() => {
                 if let Err(err) = sender.lock().await.send_heartbeat().await {
-                    warn!(error = %err, "heartbeat failed; connection may be down");
+                    warn!(error = %err, "WebSocket heartbeat failed; falling back to a plain HTTPS heartbeat");
+                    // Covers the case a dropped WebSocket wouldn't: a proxy or
+                    // captive portal that silently blocks long-lived WS
+                    // traffic while the TCP connection (and inbound.recv())
+                    // never notices anything is wrong. Plain HTTPS still gets
+                    // through in that scenario, so presence keeps refreshing
+                    // even though the reconnect path below never triggers.
+                    if let Err(err) = client.heartbeat(&auth.token).await {
+                        warn!(error = %err, "fallback HTTPS heartbeat also failed");
+                    }
                 }
 
                 // Piggybacked on the heartbeat cadence rather than its own

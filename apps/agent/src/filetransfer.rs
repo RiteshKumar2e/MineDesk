@@ -51,7 +51,6 @@ struct Inner {
 
 pub struct FileTransferHandler {
     inner: Arc<Mutex<Inner>>,
-    channel: Arc<RTCDataChannel>,
 }
 
 impl FileTransferHandler {
@@ -67,11 +66,19 @@ impl FileTransferHandler {
         }
 
         let inner = Arc::new(Mutex::new(Inner { roots, permissions, active: None }));
-        let handler = Self { inner: inner.clone(), channel: channel.clone() };
+        let handler = Self { inner: inner.clone() };
 
+        // A clone dedicated to the closure: `channel.on_message(...)` needs
+        // `channel` itself as its receiver, which conflicts with a `move`
+        // closure that also wants to consume a binding named `channel` from
+        // the enclosing scope in the same expression. The handler itself
+        // never needs the channel again after wiring this up - every reply
+        // it sends is scoped to one message and gets its own channel clone
+        // via `dispatch`.
+        let channel_for_handler = channel.clone();
         channel.on_message(Box::new(move |msg: DataChannelMessage| {
             let inner = inner.clone();
-            let channel = channel.clone();
+            let channel = channel_for_handler.clone();
             Box::pin(async move {
                 if let Err(err) = dispatch(inner, channel, msg).await {
                     warn!(error = %err, "file transfer message handling failed");
@@ -207,7 +214,7 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
             let guard = inner.lock().await;
             if !guard.permissions.upload {
                 drop(guard);
-                return permission_denied(&channel, request_id, None).await;
+                return permission_denied(&channel, Some(request_id), None).await;
             }
             let result = resolve_new_entry(&guard, &path, &name);
             drop(guard);
@@ -215,9 +222,9 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
             match result {
                 Ok(target) => match tokio::fs::create_dir(&target).await {
                     Ok(()) => send(&channel, &FileControlOut::FileOk { request_id }).await,
-                    Err(err) => file_error(&channel, request_id, "FILE_TRANSFER_FAILED", &err.to_string()).await,
+                    Err(err) => file_error(&channel, Some(request_id), "FILE_TRANSFER_FAILED", &err.to_string()).await,
                 },
-                Err(rejection) => file_error(&channel, request_id, error_code(&rejection), "That name is not allowed.").await,
+                Err(rejection) => file_error(&channel, Some(request_id), error_code(&rejection), "That name is not allowed.").await,
             }
         }
 
@@ -225,11 +232,11 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
             let guard = inner.lock().await;
             if !guard.permissions.delete {
                 drop(guard);
-                return permission_denied(&channel, request_id, None).await;
+                return permission_denied(&channel, Some(request_id), None).await;
             }
             if !paths::is_bare_name(&new_name) {
                 drop(guard);
-                return file_error(&channel, request_id, "VALIDATION_ERROR", "That name is not allowed.").await;
+                return file_error(&channel, Some(request_id), "VALIDATION_ERROR", "That name is not allowed.").await;
             }
 
             let source = match split_virtual_path(&guard.roots, &path).and_then(|(root, rest)| {
@@ -238,7 +245,7 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
                 Some(p) => p,
                 None => {
                     drop(guard);
-                    return file_error(&channel, request_id, "FILE_NOT_FOUND", "That file could not be found.").await;
+                    return file_error(&channel, Some(request_id), "FILE_NOT_FOUND", "That file could not be found.").await;
                 }
             };
             let destination = source.with_file_name(&new_name);
@@ -246,7 +253,7 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
 
             match tokio::fs::rename(&source, &destination).await {
                 Ok(()) => send(&channel, &FileControlOut::FileOk { request_id }).await,
-                Err(err) => file_error(&channel, request_id, "FILE_TRANSFER_FAILED", &err.to_string()).await,
+                Err(err) => file_error(&channel, Some(request_id), "FILE_TRANSFER_FAILED", &err.to_string()).await,
             }
         }
 
@@ -254,13 +261,13 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
             let guard = inner.lock().await;
             if !guard.permissions.delete {
                 drop(guard);
-                return permission_denied(&channel, request_id, None).await;
+                return permission_denied(&channel, Some(request_id), None).await;
             }
             let target = split_virtual_path(&guard.roots, &path).and_then(|(root, rest)| paths::resolve_within_root(root, &rest).ok());
             drop(guard);
 
             let Some(target) = target else {
-                return file_error(&channel, request_id, "FILE_NOT_FOUND", "That file could not be found.").await;
+                return file_error(&channel, Some(request_id), "FILE_NOT_FOUND", "That file could not be found.").await;
             };
 
             let result = if tokio::fs::metadata(&target).await.map(|m| m.is_dir()).unwrap_or(false) {
@@ -271,7 +278,7 @@ async fn handle_control(inner: Arc<Mutex<Inner>>, channel: Arc<RTCDataChannel>, 
 
             match result {
                 Ok(()) => send(&channel, &FileControlOut::FileOk { request_id }).await,
-                Err(err) => file_error(&channel, request_id, "FILE_TRANSFER_FAILED", &err.to_string()).await,
+                Err(err) => file_error(&channel, Some(request_id), "FILE_TRANSFER_FAILED", &err.to_string()).await,
             }
         }
 

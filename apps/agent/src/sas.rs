@@ -28,7 +28,7 @@
 //! actual attempt to bypass it.
 
 use anyhow::{bail, Result};
-use windows::core::BOOL;
+use windows::Win32::Foundation::BOOL;
 
 #[link(name = "sas")]
 extern "system" {

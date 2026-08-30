@@ -30,7 +30,7 @@ toml = "0.8"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 bytes = "1"
 
 # WebRTC: media transport (video track + reliable/unreliable data channels)
@@ -44,7 +44,11 @@ openh264 = { version = "0.6", features = ["source"] }
 
 # Opus encoding for the remote-audio track. audiopus_sys vendors and builds
 # libopus (BSD-licensed) from source, so no system package is required.
-audiopus = "0.3"
+# Pinned to the exact prerelease version: audiopus never actually cut a
+# stable 0.3.0, and 0.3.0-rc.0 is the version the ecosystem has settled on as
+# its de facto stable release (cargo's own error message when this was
+# initially left as "0.3" pointed here).
+audiopus = "=0.3.0-rc.0"
 
 # Cross-platform clipboard access - see src/clipboard.rs for why this is
 # preferred over hand-written Win32 clipboard FFI.

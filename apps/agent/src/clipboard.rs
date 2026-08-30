@@ -20,7 +20,6 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::warn;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 /// Clipboard sync is for short strings (URLs, passwords, snippets) shared
@@ -92,16 +91,3 @@ impl Drop for ClipboardSync {
     }
 }
 
-/// One-shot helper for contexts that don't need the polling watcher.
-pub fn write_text(text: &str) -> Result<()> {
-    if text.len() > MAX_CLIPBOARD_TEXT_BYTES {
-        anyhow::bail!("clipboard text exceeds the {MAX_CLIPBOARD_TEXT_BYTES}-byte sync limit");
-    }
-    match arboard::Clipboard::new().and_then(|mut c| c.set_text(text.to_string())) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            warn!(error = %err, "failed to write clipboard");
-            Err(err.into())
-        }
-    }
-}

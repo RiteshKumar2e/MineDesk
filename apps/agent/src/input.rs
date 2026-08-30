@@ -10,14 +10,28 @@
 //! when more than one is shared) is not implemented yet - this MVP drives the
 //! primary display only, matching `capture.rs`, which currently captures
 //! output 0 of the primary adapter.
+//!
+//! Keyboard injection uses hardware scan codes (`KEYEVENTF_SCANCODE`), not
+//! virtual-key codes. `KeyboardEvent.code` (what the browser sends) already
+//! names a *physical* key position, independent of layout - exactly what a
+//! PC/AT "Set 1" scan code also identifies. Windows converts a scan code to
+//! a character using whatever keyboard layout is active on the remote
+//! machine at the moment of injection, so this produces the correct
+//! character under any layout with one table, rather than one virtual-key
+//! table per layout. An earlier version of this file sent `VK_OEM_*`
+//! virtual keys for punctuation, which are US-layout key *identities* (e.g.
+//! `VK_OEM_1` means "the ;: key on a US keyboard") and produced wrong
+//! characters on any other layout - this was a genuine, previously-flagged
+//! bug, not just a documented limitation.
 
 use crate::protocol::{InputMessage, MouseButton};
 use tracing::warn;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -115,7 +129,12 @@ impl InputInjector {
                 mi: MOUSEINPUT {
                     dx,
                     dy,
-                    mouseData: mouse_data,
+                    // MOUSEINPUT.mouseData is a DWORD, but for wheel events
+                    // Windows treats its bits as a signed quantity (negative
+                    // = scroll the other way) - `as u32` reinterprets the
+                    // two's-complement bit pattern rather than clamping,
+                    // which is exactly what the API expects here.
+                    mouseData: mouse_data as u32,
                     dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
@@ -130,18 +149,29 @@ impl InputInjector {
     }
 
     fn key(&self, code: &str, is_up: bool) {
-        let Some(vk) = dom_code_to_vk(code) else {
-            warn!(code, "no virtual-key mapping for this key code; ignoring");
+        let Some((scan, extended)) = dom_code_to_scancode(code) else {
+            warn!(code, "no scan-code mapping for this key code; ignoring");
             return;
         };
+
+        let mut flags = KEYEVENTF_SCANCODE;
+        if extended {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        if is_up {
+            flags |= KEYEVENTF_KEYUP;
+        }
 
         let input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk),
-                    wScan: 0,
-                    dwFlags: if is_up { KEYEVENTF_KEYUP } else { Default::default() },
+                    // wVk is left unset (0) when injecting by scan code -
+                    // Windows derives the virtual key from wScan and the
+                    // active layout, which is the whole point.
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: scan,
+                    dwFlags: flags,
                     time: 0,
                     dwExtraInfo: 0,
                 },
@@ -161,53 +191,83 @@ impl Default for InputInjector {
     }
 }
 
-/// Maps a `KeyboardEvent.code` (physical key, layout-independent) to a Win32
-/// virtual-key code. Deliberately explicit and total-looking rather than
-/// clever: a missing mapping should be obvious to add, not hidden behind a
-/// formula that happens to work for the keys someone tested.
-fn dom_code_to_vk(code: &str) -> Option<u16> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::*;
-
+/// Maps a `KeyboardEvent.code` (physical key position) to a PC/AT "Set 1"
+/// hardware scan code plus whether it needs the 0xE0 extended-key prefix
+/// (represented via `KEYEVENTF_EXTENDEDKEY` rather than an actual 0xE0 byte
+/// in `wScan` - that is how `SendInput` wants it). Deliberately explicit and
+/// total-looking rather than clever: a missing mapping should be obvious to
+/// add, not hidden behind a formula that happens to work for the keys
+/// someone tested. Reference: Microsoft's "Keyboard Scan Code Specification"
+/// / the standard IBM PC/AT Set 1 make-code table.
+fn dom_code_to_scancode(code: &str) -> Option<(u16, bool)> {
     Some(match code {
-        // Letters
-        "KeyA" => VK_A.0, "KeyB" => VK_B.0, "KeyC" => VK_C.0, "KeyD" => VK_D.0,
-        "KeyE" => VK_E.0, "KeyF" => VK_F.0, "KeyG" => VK_G.0, "KeyH" => VK_H.0,
-        "KeyI" => VK_I.0, "KeyJ" => VK_J.0, "KeyK" => VK_K.0, "KeyL" => VK_L.0,
-        "KeyM" => VK_M.0, "KeyN" => VK_N.0, "KeyO" => VK_O.0, "KeyP" => VK_P.0,
-        "KeyQ" => VK_Q.0, "KeyR" => VK_R.0, "KeyS" => VK_S.0, "KeyT" => VK_T.0,
-        "KeyU" => VK_U.0, "KeyV" => VK_V.0, "KeyW" => VK_W.0, "KeyX" => VK_X.0,
-        "KeyY" => VK_Y.0, "KeyZ" => VK_Z.0,
+        "Escape" => (0x01, false),
         // Digits (top row)
-        "Digit0" => VK_0.0, "Digit1" => VK_1.0, "Digit2" => VK_2.0, "Digit3" => VK_3.0,
-        "Digit4" => VK_4.0, "Digit5" => VK_5.0, "Digit6" => VK_6.0, "Digit7" => VK_7.0,
-        "Digit8" => VK_8.0, "Digit9" => VK_9.0,
-        // Function keys
-        "F1" => VK_F1.0, "F2" => VK_F2.0, "F3" => VK_F3.0, "F4" => VK_F4.0,
-        "F5" => VK_F5.0, "F6" => VK_F6.0, "F7" => VK_F7.0, "F8" => VK_F8.0,
-        "F9" => VK_F9.0, "F10" => VK_F10.0, "F11" => VK_F11.0, "F12" => VK_F12.0,
-        // Navigation / editing
-        "ArrowUp" => VK_UP.0, "ArrowDown" => VK_DOWN.0, "ArrowLeft" => VK_LEFT.0, "ArrowRight" => VK_RIGHT.0,
-        "Home" => VK_HOME.0, "End" => VK_END.0, "PageUp" => VK_PRIOR.0, "PageDown" => VK_NEXT.0,
-        "Insert" => VK_INSERT.0, "Delete" => VK_DELETE.0, "Backspace" => VK_BACK.0,
-        "Enter" | "NumpadEnter" => VK_RETURN.0, "Tab" => VK_TAB.0, "Escape" => VK_ESCAPE.0, "Space" => VK_SPACE.0,
-        // Modifiers - left/right variants matter for shortcuts like Ctrl+Alt+Del semantics
-        "ShiftLeft" => VK_LSHIFT.0, "ShiftRight" => VK_RSHIFT.0,
-        "ControlLeft" => VK_LCONTROL.0, "ControlRight" => VK_RCONTROL.0,
-        "AltLeft" => VK_LMENU.0, "AltRight" => VK_RMENU.0,
-        "MetaLeft" | "OSLeft" => VK_LWIN.0, "MetaRight" | "OSRight" => VK_RWIN.0,
-        "CapsLock" => VK_CAPITAL.0, "NumLock" => VK_NUMLOCK.0, "ScrollLock" => VK_SCROLL.0,
-        "ContextMenu" => VK_APPS.0,
-        // Punctuation (US layout positions - see known limitations in README)
-        "Minus" => VK_OEM_MINUS.0, "Equal" => VK_OEM_PLUS.0,
-        "BracketLeft" => VK_OEM_4.0, "BracketRight" => VK_OEM_6.0, "Backslash" => VK_OEM_5.0,
-        "Semicolon" => VK_OEM_1.0, "Quote" => VK_OEM_7.0, "Comma" => VK_OEM_COMMA.0,
-        "Period" => VK_OEM_PERIOD.0, "Slash" => VK_OEM_2.0, "Backquote" => VK_OEM_3.0,
-        // Numpad
-        "Numpad0" => VK_NUMPAD0.0, "Numpad1" => VK_NUMPAD1.0, "Numpad2" => VK_NUMPAD2.0,
-        "Numpad3" => VK_NUMPAD3.0, "Numpad4" => VK_NUMPAD4.0, "Numpad5" => VK_NUMPAD5.0,
-        "Numpad6" => VK_NUMPAD6.0, "Numpad7" => VK_NUMPAD7.0, "Numpad8" => VK_NUMPAD8.0,
-        "Numpad9" => VK_NUMPAD9.0, "NumpadAdd" => VK_ADD.0, "NumpadSubtract" => VK_SUBTRACT.0,
-        "NumpadMultiply" => VK_MULTIPLY.0, "NumpadDivide" => VK_DIVIDE.0, "NumpadDecimal" => VK_DECIMAL.0,
+        "Digit1" => (0x02, false), "Digit2" => (0x03, false), "Digit3" => (0x04, false),
+        "Digit4" => (0x05, false), "Digit5" => (0x06, false), "Digit6" => (0x07, false),
+        "Digit7" => (0x08, false), "Digit8" => (0x09, false), "Digit9" => (0x0A, false),
+        "Digit0" => (0x0B, false),
+        "Minus" => (0x0C, false), "Equal" => (0x0D, false),
+        "Backspace" => (0x0E, false),
+        "Tab" => (0x0F, false),
+        // Letters (QWERTY row order, matching scan code layout - not alphabetical)
+        "KeyQ" => (0x10, false), "KeyW" => (0x11, false), "KeyE" => (0x12, false), "KeyR" => (0x13, false),
+        "KeyT" => (0x14, false), "KeyY" => (0x15, false), "KeyU" => (0x16, false), "KeyI" => (0x17, false),
+        "KeyO" => (0x18, false), "KeyP" => (0x19, false),
+        "BracketLeft" => (0x1A, false), "BracketRight" => (0x1B, false),
+        "Enter" => (0x1C, false),
+        "ControlLeft" => (0x1D, false),
+        "KeyA" => (0x1E, false), "KeyS" => (0x1F, false), "KeyD" => (0x20, false), "KeyF" => (0x21, false),
+        "KeyG" => (0x22, false), "KeyH" => (0x23, false), "KeyJ" => (0x24, false), "KeyK" => (0x25, false),
+        "KeyL" => (0x26, false),
+        "Semicolon" => (0x27, false), "Quote" => (0x28, false),
+        "Backquote" => (0x29, false),
+        "ShiftLeft" => (0x2A, false),
+        "Backslash" => (0x2B, false),
+        "KeyZ" => (0x2C, false), "KeyX" => (0x2D, false), "KeyC" => (0x2E, false), "KeyV" => (0x2F, false),
+        "KeyB" => (0x30, false), "KeyN" => (0x31, false), "KeyM" => (0x32, false),
+        "Comma" => (0x33, false), "Period" => (0x34, false), "Slash" => (0x35, false),
+        // Right Shift has no extended-key prefix (only right Ctrl/Alt do) -
+        // this asymmetry is part of the real Set 1 table, not a typo.
+        "ShiftRight" => (0x36, false),
+        "NumpadMultiply" => (0x37, false),
+        "AltLeft" => (0x38, false),
+        "Space" => (0x39, false),
+        "CapsLock" => (0x3A, false),
+        "F1" => (0x3B, false), "F2" => (0x3C, false), "F3" => (0x3D, false), "F4" => (0x3E, false),
+        "F5" => (0x3F, false), "F6" => (0x40, false), "F7" => (0x41, false), "F8" => (0x42, false),
+        "F9" => (0x43, false), "F10" => (0x44, false),
+        "NumLock" => (0x45, false),
+        "ScrollLock" => (0x46, false),
+        "Numpad7" => (0x47, false), "Numpad8" => (0x48, false), "Numpad9" => (0x49, false),
+        "NumpadSubtract" => (0x4A, false),
+        "Numpad4" => (0x4B, false), "Numpad5" => (0x4C, false), "Numpad6" => (0x4D, false),
+        "NumpadAdd" => (0x4E, false),
+        "Numpad1" => (0x4F, false), "Numpad2" => (0x50, false), "Numpad3" => (0x51, false),
+        "Numpad0" => (0x52, false),
+        "NumpadDecimal" => (0x53, false),
+        "F11" => (0x57, false), "F12" => (0x58, false),
+
+        // Extended (0xE0-prefixed) keys - same low byte as some codes above,
+        // disambiguated from them by the extended-key flag at the call site.
+        "NumpadEnter" => (0x1C, true),
+        "ControlRight" => (0x1D, true),
+        "NumpadDivide" => (0x35, true),
+        "AltRight" => (0x38, true),
+        "Home" => (0x47, true),
+        "ArrowUp" => (0x48, true),
+        "PageUp" => (0x49, true),
+        "ArrowLeft" => (0x4B, true),
+        "ArrowRight" => (0x4D, true),
+        "End" => (0x4F, true),
+        "ArrowDown" => (0x50, true),
+        "PageDown" => (0x51, true),
+        "Insert" => (0x52, true),
+        "Delete" => (0x53, true),
+        "MetaLeft" | "OSLeft" => (0x5B, true),
+        "MetaRight" | "OSRight" => (0x5C, true),
+        "ContextMenu" => (0x5D, true),
+
         _ => return None,
     })
 }

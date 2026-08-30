@@ -107,7 +107,7 @@ pub struct ActiveSession {
     camera: Option<CaptureHandle>,
     microphone: Option<CaptureHandle>,
     file_transfer: Option<FileTransferHandler>,
-    clipboard_sync: Option<ClipboardSync>,
+    clipboard_sync: Option<Arc<ClipboardSync>>,
 }
 
 /// A background capture loop plus its cooperative stop signal.
@@ -410,15 +410,21 @@ pub async fn start(
         .await
         .context("creating motion input data channel")?;
 
-    let injector = Arc::new(InputInjector::new());
-    wire_input_channel(reliable_channel.clone(), injector.clone(), session_id.clone(), capabilities);
-    wire_input_channel(motion_channel, injector, session_id.clone(), capabilities);
-
+    // Created before the channels are wired so the inbound handler can apply
+    // an incoming `clipboard:text` through the *same* `ClipboardSync` that
+    // watches the local clipboard for outgoing changes - going through
+    // anything else (a bare write) would leave its `last_seen` value stale,
+    // and the very next poll would mistake the controller's own update for a
+    // new local change and echo it right back.
     let clipboard_sync = if capabilities.clipboard {
-        Some(spawn_clipboard_sync(reliable_channel.clone(), session_id.clone()))
+        Some(Arc::new(spawn_clipboard_sync(reliable_channel.clone(), session_id.clone())))
     } else {
         None
     };
+
+    let injector = Arc::new(InputInjector::new());
+    wire_input_channel(reliable_channel.clone(), injector.clone(), session_id.clone(), capabilities, clipboard_sync.clone());
+    wire_input_channel(motion_channel, injector, session_id.clone(), capabilities, clipboard_sync.clone());
 
     // --- file transfer channel -------------------------------------------
     let file_transfer = if capabilities.file_upload || capabilities.file_download || capabilities.file_delete {
@@ -712,7 +718,13 @@ fn spawn_clipboard_sync(channel: Arc<RTCDataChannel>, session_id: String) -> Cli
     })
 }
 
-fn wire_input_channel(channel: Arc<RTCDataChannel>, injector: Arc<InputInjector>, session_id: String, capabilities: SessionCapabilities) {
+fn wire_input_channel(
+    channel: Arc<RTCDataChannel>,
+    injector: Arc<InputInjector>,
+    session_id: String,
+    capabilities: SessionCapabilities,
+    clipboard_sync: Option<Arc<ClipboardSync>>,
+) {
     let channel_label = channel.label().to_string();
     channel.on_open(Box::new(move || {
         info!(session_id = %session_id, channel = %channel_label, "input data channel open");
@@ -721,6 +733,7 @@ fn wire_input_channel(channel: Arc<RTCDataChannel>, injector: Arc<InputInjector>
 
     channel.on_message(Box::new(move |msg: DataChannelMessage| {
         let injector = injector.clone();
+        let clipboard_sync = clipboard_sync.clone();
         Box::pin(async move {
             let Ok(text) = String::from_utf8(msg.data.to_vec()) else { return };
             let Ok(input) = serde_json::from_str::<crate::protocol::InputMessage>(&text) else {
@@ -759,8 +772,13 @@ fn wire_input_channel(channel: Arc<RTCDataChannel>, injector: Arc<InputInjector>
                     }
                 }
                 crate::protocol::InputMessage::ClipboardText { direction, text } if direction == "to-remote" => {
-                    if capabilities.clipboard {
-                        if let Err(err) = crate::clipboard::write_text(text) {
+                    if let (true, Some(sync)) = (capabilities.clipboard, &clipboard_sync) {
+                        // Routed through the same ClipboardSync the outgoing
+                        // poller uses, specifically so this write updates its
+                        // last-seen value - see this function's call site for
+                        // why a bare write would cause an echo back to the
+                        // controller on the next poll.
+                        if let Err(err) = sync.write_from_remote(text) {
                             warn!(error = %err, "failed to apply clipboard text from controller");
                         }
                     }

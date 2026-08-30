@@ -7,47 +7,53 @@ media/data transport (`webrtc-rs`), and mouse/keyboard injection
 (`SendInput`). See the root `README.md` for how this fits into the rest of
 the platform.
 
-**This code has not been compiled in this environment** - the sandbox this
-was written in has no Rust toolchain installed. Everything below follows
-documented Win32/DXGI/WASAPI/webrtc-rs APIs carefully, and every module was
-re-read at least once specifically hunting for the kind of mistake a
-compiler would catch, but that process is not a substitute for one - the
-clearest evidence of that is `main.rs`'s frame-handling `match` genuinely
-failed to cover every `ServerFrame` variant (`session:state` was missing)
-across two earlier phases before this review caught it; a real compiler
-would have refused to build on day one. Budget for a round of real compiler
-feedback (crate version drift, exact method signatures) before this builds
-clean. Files most likely to need adjustment, in descending order of risk:
+**This code has been compiled and verified against a real Rust toolchain**
+(rustup stable-x86_64-pc-windows-msvc, cargo/rustc 1.97.1, with VS 2019 Build
+Tools' MSVC linker and Windows SDK 10.0.22000.0). Both `cargo check` and a
+full `cargo build` (debug) and `cargo build --release` (LTO, `panic = "abort"`,
+`codegen-units = 1`, `strip = true`, per this crate's `[profile.release]`)
+complete with exit code 0 and produce a working `minedesk-agent.exe`
+(confirmed to run and respond correctly to `--help`, `enroll --help`, and a
+bare `run` with no enrollment present). Getting there took a real round of
+compiler feedback - 29 genuine compile errors across `sas.rs`, `video.rs`,
+`audio.rs`, `filetransfer.rs`, `capture.rs`, and `input.rs`, all of them
+exactly the class of mistake anticipated below (wrong FFI out-parameter
+shape, a trait's real method names differing from the guessed ones, a flags
+constant that's a plain integer rather than a newtype), plus one dependency
+that needed pinning (`audiopus = "0.3"` doesn't resolve; only the
+`0.3.0-rc.0` prerelease exists and is what the ecosystem treats as stable)
+and one build-time environment variable for a vendored C dependency
+(`CMAKE_POLICY_VERSION_MINIMUM = "3.5"`, needed by `audiopus_sys`'s bundled
+Opus against CMake 4.x, now persisted in `.cargo/config.toml` so nobody
+building this crate needs to set it by hand). Compiler feedback also caught
+a real runtime bug manual review had missed: a dead-code warning on
+`ClipboardSync::write_from_remote` led to finding that controller-to-remote
+clipboard writes weren't updating the poller's dedup state, which would have
+echoed them straight back to the controller as a spurious "new" clipboard
+change - fixed by sharing one `ClipboardSync` instance between the poller and
+the inbound message handler.
 
-1. `src/audio.rs` - WASAPI/COM FFI (`IAudioClient`/`IAudioCaptureClient`
-   out-parameter conventions), plus its own explicitly-stated assumption that
-   the mix format is 32-bit float at a rate Opus accepts natively - see that
-   file's doc comment. Shared by remote-audio (loopback) and microphone
-   capture, so a fix here fixes both.
-2. `src/capture.rs` - DXGI/D3D11 FFI (same class of risk as audio.rs, for
-   screen instead of sound)
-3. `src/camera.rs` - depends on `nokhwa`'s exact `Camera`/`RequestedFormat`
-   API for the installed version; conceptually simple (open, read a frame,
-   convert RGB to BGRA) but the crate's surface has shifted across versions
-4. `src/video.rs` - depends on `openh264`'s `YUVSource` trait shape
-5. `src/session.rs` and `src/filetransfer.rs` - webrtc-rs closure/callback
-   and `RTCDataChannel` method signatures (`on_message`, `send`/`send_text`,
-   `buffered_amount`), whatever `create_offer`/`add_track` require for a
-   *second* negotiation on an already-connected `RTCPeerConnection` (used by
-   camera/microphone grants, reconnection, and ICE restart alike), and
-   specifically `on_ice_connection_state_change` plus `RTCOfferOptions`'s
-   exact field names (`ice_restart`, `voice_activity_detection`) for the
-   restart path - all exercised nowhere else in this codebase
-6. `src/clipboard.rs` - low risk; `arboard`'s API is small and stable
-7. everything else - ordinary async Rust (tokio, reqwest, serde) or pure
-   logic with no FFI (`src/paths.rs`), lowest risk
+**What is still unverified is end-to-end runtime behavior against a live
+server and real hardware** - actual screen capture from a real GPU, a real
+WebRTC negotiation against the signaling hub, and real camera/microphone
+devices have not been exercised in this environment, only compilation,
+linking, and CLI-level smoke tests. Treat that as the remaining risk, not
+the FFI signatures themselves.
 
 ## Prerequisites
 
-- Rust (stable), via [rustup](https://rustup.rs)
+- Rust (stable), via [rustup](https://rustup.rs) - verified against the
+  `stable-x86_64-pc-windows-msvc` toolchain
 - The MSVC toolchain: Visual Studio Build Tools with the "Desktop development
   with C++" workload (provides the linker and Windows SDK `openh264-sys2`
-  and `windows` both need)
+  and `windows` both need) - verified against VS 2019 Build Tools with the
+  `VC.Tools.x86.x64` component and Windows SDK 10.0.22000.0
+- CMake (verified against 4.4.2) to build `audiopus_sys`'s vendored Opus.
+  `apps/agent/.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM = "3.5"`
+  for every build in this crate, which CMake 4.x requires before it will
+  configure a project whose `CMakeLists.txt` declares an old
+  `cmake_minimum_required` - no manual setup needed beyond having CMake on
+  `PATH`
 - Windows 10/11 for anything beyond `cargo check` - DXGI Desktop Duplication
   and `SendInput` are Windows-only and stubbed out on other platforms
 
@@ -55,8 +61,8 @@ clean. Files most likely to need adjustment, in descending order of risk:
 
 ```bash
 cd apps/agent
-cargo build            # debug
-cargo build --release  # optimized, single binary at target/release/minedesk-agent.exe
+cargo build            # debug - verified working, target/debug/minedesk-agent.exe
+cargo build --release  # optimized, single binary at target/release/minedesk-agent.exe - verified working
 ```
 
 ## Enroll and run
@@ -182,9 +188,10 @@ These are honestly-scoped gaps, not oversights papered over:
   shared folder's own basename) rather than being merged into one browsable
   tree - a controller always sees at least one extra directory level before
   reaching actual shared content.
-- **Punctuation key mapping in `input.rs` assumes a US keyboard layout.**
-  Letters, digits and control keys are layout-independent by virtue of using
-  `KeyboardEvent.code`, but the OEM punctuation keys (`Minus`, `Equal`,
-  `BracketLeft`, ...) are mapped to their US-layout virtual-key codes. A
-  fully layout-correct mapping needs `VkKeyScanEx`/`MapVirtualKeyEx` against
-  the remote machine's active layout.
+- ~~**Punctuation key mapping in `input.rs` assumes a US keyboard layout.**~~
+  **Fixed.** `input.rs` now injects hardware scan codes
+  (`KEYEVENTF_SCANCODE`) instead of virtual-key codes: `KeyboardEvent.code`
+  already names a physical key position, which is exactly what a scan code
+  identifies, so Windows derives the correct character from whatever layout
+  is active on the remote machine at the moment of injection - correct under
+  any layout, for every key, with one table instead of a per-layout one.

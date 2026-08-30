@@ -1,0 +1,13 @@
+# Project-scoped build environment. Cargo applies `[env]` here automatically
+# to every build in this directory tree - nobody building this crate needs to
+# set this by hand.
+#
+# CMAKE_POLICY_VERSION_MINIMUM: audiopus_sys (the vendored Opus C library used
+# for remote-audio/microphone encoding) ships a CMakeLists.txt with an old
+# `cmake_minimum_required`. CMake 4.x removed compatibility with versions
+# below 3.5 and refuses to configure such a project at all unless told this
+# explicitly - see https://cmake.org/cmake/help/latest/policy/CMP0000.html
+# and the `cmake_minimum_required` policy changes in CMake's 4.0 release
+# notes. This was confirmed necessary and sufficient against CMake 4.4.2.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

@@ -19,21 +19,22 @@ use crate::capture::RawFrame;
 use anyhow::{Context, Result};
 use openh264::encoder::{Encoder, EncoderConfig};
 use openh264::formats::YUVSource;
+use openh264::OpenH264API;
 
 struct I420Frame {
-    width: i32,
-    height: i32,
+    width: usize,
+    height: usize,
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
 }
 
 impl YUVSource for I420Frame {
-    fn width(&self) -> i32 {
-        self.width
+    fn dimensions(&self) -> (usize, usize) {
+        (self.width, self.height)
     }
-    fn height(&self) -> i32 {
-        self.height
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.width, self.width / 2, self.width / 2)
     }
     fn y(&self) -> &[u8] {
         &self.y
@@ -43,15 +44,6 @@ impl YUVSource for I420Frame {
     }
     fn v(&self) -> &[u8] {
         &self.v
-    }
-    fn y_stride(&self) -> i32 {
-        self.width
-    }
-    fn u_stride(&self) -> i32 {
-        self.width / 2
-    }
-    fn v_stride(&self) -> i32 {
-        self.width / 2
     }
 }
 
@@ -87,7 +79,7 @@ fn bgra_to_i420(bgra: &[u8], width: u32, height: u32) -> I420Frame {
         }
     }
 
-    I420Frame { width: width as i32, height: height as i32, y: y_plane, u: u_plane, v: v_plane }
+    I420Frame { width: width as usize, height: height as usize, y: y_plane, u: u_plane, v: v_plane }
 }
 
 pub struct H264Encoder {
@@ -103,8 +95,15 @@ impl H264Encoder {
         // rather than producing a subtly corrupt encode if that ever changes.
         anyhow::ensure!(width % 2 == 0 && height % 2 == 0, "capture dimensions must be even for I420");
 
-        let config = EncoderConfig::new(width, height);
-        let encoder = Encoder::with_config(config).context("initializing OpenH264 encoder")?;
+        // The encoder is resolution-independent at construction time - it
+        // takes its dimensions from whatever `YUVSource` is actually passed
+        // to `encode()` each call (`I420Frame`, above). 4 Mbps is a starting
+        // point for legible screen content at 1080p/15fps; OpenH264's default
+        // (120 kbps, tuned for low-bitrate video calls) would be illegible
+        // for text and UI detail.
+        let config = EncoderConfig::new().set_bitrate_bps(4_000_000).max_frame_rate(15.0);
+        let encoder =
+            Encoder::with_api_config(OpenH264API::from_source(), config).context("initializing OpenH264 encoder")?;
         Ok(Self { encoder, width, height })
     }
 
