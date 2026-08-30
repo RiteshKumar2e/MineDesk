@@ -9,43 +9,27 @@
 //   * Audit rows survive the deletion of the session they describe (SetNull),
 //     because the security record must outlive the thing it records.
 
+// SQLite/libSQL (Turso) datasource. Enums and native arrays don't exist on
+// this connector - the four enums that used to live here (DeviceOs,
+// DeviceStatus, SessionStatus, VerificationTokenType) are now plain String
+// columns, validated the same way they always were meant to be validated:
+// by the zod schemas at the API boundary (see modules/*/schemas.ts), not by
+// the database. The `[]`-suffixed fields below (twoFactorBackupCodes,
+// sharedFolders, grantedCapabilities) are Json instead of String[] for the
+// same reason - see lib/json.ts's `asStringArray` for how application code
+// reads them back as the plain string arrays they always logically were.
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
-enum DeviceOs {
-  windows
-  macos
-  linux
-  unknown
-}
-
-enum DeviceStatus {
-  online
-  offline
-}
-
-enum SessionStatus {
-  pending
-  active
-  reconnecting
-  ended
-  denied
-  failed
-}
-
-enum VerificationTokenType {
-  email_verification
-  password_reset
-}
-
 model User {
-  id            String   @id @default(uuid()) @db.Uuid
+  id            String   @id @default(uuid())
   email         String   @unique
   passwordHash  String
   name          String
@@ -54,7 +38,8 @@ model User {
   // Two-factor authentication (TOTP). The secret is encrypted at rest.
   twoFactorEnabled       Boolean  @default(false)
   twoFactorSecret        String?
-  twoFactorBackupCodes   String[] @default([])
+  /// string[] of hashed backup codes, stored as Json - see the file-level comment.
+  twoFactorBackupCodes   Json     @default("[]")
 
   // Brute-force protection state, kept here so it survives a Redis flush.
   failedLoginAttempts Int       @default(0)
@@ -76,8 +61,8 @@ model User {
 /// One row per signed-in browser. Holds a refresh-token family; rotating the
 /// token updates tokenHash in place and bumps rotationCounter.
 model AuthSession {
-  id     String @id @default(uuid()) @db.Uuid
-  userId String @db.Uuid
+  id     String @id @default(uuid())
+  userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   /// SHA-256 of the opaque refresh token. The token itself is never stored.
@@ -106,15 +91,17 @@ model AuthSession {
 
 /// Single-use, hashed tokens for email verification and password reset.
 model VerificationToken {
-  id     String @id @default(uuid()) @db.Uuid
-  userId String @db.Uuid
+  id     String @id @default(uuid())
+  userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  type      VerificationTokenType
-  tokenHash String                @unique
+  /// 'email_verification' | 'password_reset' - see lib/../modules/auth/service.ts's
+  /// local VerificationTokenType union, the actual source of truth now.
+  type      String
+  tokenHash String    @unique
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime              @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId, type])
   @@index([expiresAt])
@@ -122,18 +109,20 @@ model VerificationToken {
 }
 
 model Device {
-  id       String @id @default(uuid()) @db.Uuid
+  id       String @id @default(uuid())
   /// Human-shareable identifier, e.g. RMT-8F32-A91C
   deviceId String @unique
-  userId   String @db.Uuid
+  userId   String
   user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   name         String
-  os           DeviceOs     @default(unknown)
+  /// 'windows' | 'macos' | 'linux' | 'unknown' - see @minedesk/types' DeviceOs.
+  os           String    @default("unknown")
   osVersion    String?
   agentVersion String?
   hostname     String?
-  status       DeviceStatus @default(offline)
+  /// 'online' | 'offline' - see @minedesk/types' DeviceStatus.
+  status       String    @default("offline")
   lastSeenAt   DateTime?
 
   /// Argon2 hash of the agent credential. Rotating it revokes the agent.
@@ -160,8 +149,8 @@ model Device {
 
 /// The capability mask enforced by the API and re-checked by the agent.
 model DevicePermission {
-  id       String @id @default(uuid()) @db.Uuid
-  deviceId String @unique @db.Uuid
+  id       String @id @default(uuid())
+  deviceId String @unique
   device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   screen       Boolean @default(true)
@@ -175,8 +164,9 @@ model DevicePermission {
   camera       Boolean @default(false)
   microphone   Boolean @default(false)
 
-  /// Absolute paths the owner shared for file transfer. Empty = no file access.
-  sharedFolders String[] @default([])
+  /// string[] of absolute paths shared for file transfer, stored as Json -
+  /// see the file-level comment. Empty = no file access.
+  sharedFolders Json @default("[]")
 
   updatedAt DateTime @updatedAt
 
@@ -185,9 +175,9 @@ model DevicePermission {
 
 /// One-time code exchanged by the agent for permanent credentials.
 model EnrollmentCode {
-  id       String  @id @default(uuid()) @db.Uuid
+  id       String  @id @default(uuid())
   code     String  @unique
-  deviceId String  @db.Uuid
+  deviceId String
   device   Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
   expiresAt DateTime
@@ -200,21 +190,24 @@ model EnrollmentCode {
 }
 
 model RemoteSession {
-  id        String @id @default(uuid()) @db.Uuid
+  id        String @id @default(uuid())
   /// Human-readable identifier, e.g. SES-2026-8F92A12
   sessionId String @unique
 
-  userId   String @db.Uuid
+  userId   String
   user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-  deviceId String @db.Uuid
+  deviceId String
   device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
-  status SessionStatus @default(pending)
+  /// 'pending'|'active'|'reconnecting'|'ended'|'denied'|'failed' - see
+  /// @minedesk/types' SessionStatus.
+  status String @default("pending")
 
   /// Snapshot of the capabilities authorized when the session was created, so
   /// that later permission edits cannot silently widen a running session.
-  grantedCapabilities String[] @default([])
-  unattended          Boolean  @default(false)
+  /// string[] of Capability values, stored as Json - see the file-level comment.
+  grantedCapabilities Json    @default("[]")
+  unattended          Boolean @default(false)
 
   /// Which capabilities actually became active during the session.
   usedCamera     Boolean @default(false)
@@ -242,15 +235,15 @@ model RemoteSession {
 }
 
 model AuditLog {
-  id String @id @default(uuid()) @db.Uuid
+  id String @id @default(uuid())
 
-  userId String? @db.Uuid
+  userId String?
   user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  deviceId String? @db.Uuid
+  deviceId String?
   device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
 
-  sessionId String?        @db.Uuid
+  sessionId String?
   session   RemoteSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   action    String

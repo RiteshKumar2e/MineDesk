@@ -1,7 +1,7 @@
 import { AuditAction, ErrorCode } from '@minedesk/protocol';
 import { DEFAULT_PERMISSIONS, normalizePermissions } from '@minedesk/shared';
 import { generateDeviceId, generateEnrollmentCode } from '@minedesk/shared/ids';
-import type { PermissionSet, PublicDevice } from '@minedesk/types';
+import type { DeviceOs, DeviceStatus, PermissionSet, PublicDevice, SessionStatus } from '@minedesk/types';
 import type { Device, DevicePermission, Prisma, RemoteSession } from '@prisma/client';
 import { recordAudit } from '../../lib/audit.js';
 import { hashPassword } from '../../lib/crypto.js';
@@ -27,12 +27,16 @@ export function toPublicDevice(device: DeviceWithRelations, online: boolean): Pu
     id: device.id,
     deviceId: device.deviceId,
     name: device.name,
-    os: device.os,
+    // os/status are plain `String` columns now (SQLite/libSQL has no enum
+    // type) - the zod schemas at the API boundary are what actually
+    // constrain the values written, so this cast just restates that contract
+    // for the response type.
+    os: device.os as DeviceOs,
     osVersion: device.osVersion,
     agentVersion: device.agentVersion,
     // Presence comes from Redis, not from the denormalized column, so a crashed
     // replica cannot leave a device permanently "online".
-    status: online ? 'online' : 'offline',
+    status: (online ? 'online' : 'offline') as DeviceStatus,
     lastSeenAt: device.lastSeenAt?.toISOString() ?? null,
     unattendedAccessEnabled: device.unattendedAccessEnabled,
     hasUnattendedPassword: Boolean(device.unattendedPasswordHash),
@@ -43,7 +47,7 @@ export function toPublicDevice(device: DeviceWithRelations, online: boolean): Pu
       ? {
           id: active.id,
           sessionId: active.sessionId,
-          status: active.status,
+          status: active.status as SessionStatus,
           startedAt: (active.startedAt ?? active.requestedAt).toISOString(),
           endedAt: active.endedAt?.toISOString() ?? null,
         }

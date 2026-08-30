@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuditAction } from '@minedesk/protocol';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
+import { asStringArray } from '../../lib/json.js';
 import { isDeviceOnline } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 import {
@@ -68,7 +69,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     const online = await isDeviceOnline(device.deviceId);
     return reply.send({
       device: toPublicDevice(device, online),
-      sharedFolders: device.permissions?.sharedFolders ?? [],
+      sharedFolders: asStringArray(device.permissions?.sharedFolders),
     });
   });
 
@@ -166,7 +167,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
         unattended: session.unattended,
         connectionType: session.connectionType,
         endReason: session.endReason,
-        capabilities: session.grantedCapabilities,
+        capabilities: asStringArray(session.grantedCapabilities),
         usedCamera: session.usedCamera,
         usedMicrophone: session.usedMicrophone,
         usedAudio: session.usedAudio,

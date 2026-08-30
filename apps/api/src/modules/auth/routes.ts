@@ -4,6 +4,7 @@ import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { decryptSecret, encryptSecret, verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
+import { asStringArray } from '../../lib/json.js';
 import { prisma } from '../../lib/prisma.js';
 import { STRICT_LIMITS } from '../../plugins/security.js';
 import {
@@ -140,13 +141,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const totpOk = secret ? verifyTotp(secret, input.code) : false;
 
     let usedBackupCode = false;
+    let backupCodesRemainingCount = 0;
     if (!totpOk) {
-      const index = findBackupCode(user.twoFactorBackupCodes, input.code);
+      const stored = asStringArray(user.twoFactorBackupCodes);
+      const index = findBackupCode(stored, input.code);
       if (index === -1) throw new AppError(ErrorCode.TWO_FACTOR_INVALID);
       // Backup codes are single use: burn it before issuing anything.
-      const remaining = user.twoFactorBackupCodes.filter((_, i) => i !== index);
+      const remaining = stored.filter((_, i) => i !== index);
       await prisma.user.update({ where: { id: user.id }, data: { twoFactorBackupCodes: remaining } });
       usedBackupCode = true;
+      backupCodesRemainingCount = remaining.length;
     }
 
     const session = await issueSession(user, meta(request));
@@ -162,7 +166,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       user: toPublicUser(user),
       accessToken: session.accessToken,
       expiresIn: session.expiresIn,
-      backupCodesRemaining: usedBackupCode ? user.twoFactorBackupCodes.length - 1 : undefined,
+      backupCodesRemaining: usedBackupCode ? backupCodesRemainingCount : undefined,
     });
   });
 
@@ -345,7 +349,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         throw new AppError(ErrorCode.INVALID_CREDENTIALS);
       }
       const secret = user.twoFactorSecret ? decryptSecret(user.twoFactorSecret) : null;
-      const ok = (secret && verifyTotp(secret, input.code)) || findBackupCode(user.twoFactorBackupCodes, input.code) !== -1;
+      const ok =
+        (secret && verifyTotp(secret, input.code)) ||
+        findBackupCode(asStringArray(user.twoFactorBackupCodes), input.code) !== -1;
       if (!ok) throw new AppError(ErrorCode.TWO_FACTOR_INVALID);
 
       await prisma.user.update({

@@ -7,6 +7,7 @@ import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { hashPassword, verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
 import { buildIceServers } from '../../lib/ice.js';
+import { asStringArray } from '../../lib/json.js';
 import { markDeviceOffline, refreshPresence } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 import { signAgentToken } from '../../lib/tokens.js';
@@ -144,7 +145,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       deviceName: device.name,
       permissions,
       capabilities: grantedCapabilities(permissions),
-      sharedFolders: device.permissions?.sharedFolders ?? [],
+      sharedFolders: asStringArray(device.permissions?.sharedFolders),
       unattendedAccessEnabled: device.unattendedAccessEnabled,
       iceServers: buildIceServers(device.deviceId),
       heartbeatIntervalMs: env.AGENT_HEARTBEAT_INTERVAL_MS,

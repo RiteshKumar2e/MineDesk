@@ -7,6 +7,7 @@ import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
 import { buildIceServers } from '../../lib/ice.js';
+import { asStringArray } from '../../lib/json.js';
 import { getPresence, isDeviceOnline } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 import { clearUnattendedFailures, isUnattendedAccessLocked, recordUnattendedFailure } from '../../lib/unattendedLockout.js';
@@ -190,7 +191,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       sessionId: session.sessionId,
       status: session.status,
       unattended: session.unattended,
-      capabilities: session.grantedCapabilities,
+      capabilities: asStringArray(session.grantedCapabilities),
       iceServers: buildIceServers(session.sessionId),
       deviceOnline: presence !== null,
     });
@@ -212,7 +213,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         status: session.status,
         device: session.device,
         unattended: session.unattended,
-        capabilities: session.grantedCapabilities,
+        capabilities: asStringArray(session.grantedCapabilities),
         connectionType: session.connectionType,
         requestedAt: session.requestedAt.toISOString(),
         startedAt: session.startedAt?.toISOString() ?? null,
@@ -247,7 +248,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         sessionId: session.sessionId,
         status: session.status,
         device: session.device,
-        capabilities: session.grantedCapabilities,
+        capabilities: asStringArray(session.grantedCapabilities),
         requestedAt: session.requestedAt.toISOString(),
         startedAt: session.startedAt?.toISOString() ?? null,
         endedAt: session.endedAt?.toISOString() ?? null,

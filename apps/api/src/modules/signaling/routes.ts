@@ -1,4 +1,5 @@
 import { AuditAction, PROTOCOL_VERSION, parseClientMessage, type ServerMessage } from '@minedesk/protocol';
+import type { SessionStatus } from '@minedesk/types';
 import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { env } from '../../config/env.js';
@@ -200,7 +201,10 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
             v: PROTOCOL_VERSION,
             type: 'session:state',
             sessionId: message.sessionId,
-            status: session.status,
+            // status is a plain String column now (no Prisma enum on
+            // SQLite/libSQL) - the zod schemas that write it are what
+            // actually constrain the value, same as elsewhere in this file.
+            status: session.status as SessionStatus,
           });
 
           // Tell the agent it is now safe to publish its offer: publishing

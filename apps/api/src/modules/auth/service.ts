@@ -1,6 +1,6 @@
 import { AuditAction, ErrorCode } from '@minedesk/protocol';
 import type { PublicAuthSession, PublicUser } from '@minedesk/types';
-import type { AuthSession, User, VerificationTokenType } from '@prisma/client';
+import type { AuthSession, User } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { env } from '../../config/env.js';
 import { recordAudit } from '../../lib/audit.js';
@@ -318,6 +318,10 @@ export async function listAuthSessions(userId: string): Promise<AuthSession[]> {
 // --------------------------------------------------------------------------
 // Verification / reset tokens
 // --------------------------------------------------------------------------
+
+/// No longer a Prisma enum (SQLite/libSQL has none) - this is now the single
+/// source of truth for the allowed values, stored as a plain String column.
+type VerificationTokenType = 'email_verification' | 'password_reset';
 
 const TOKEN_TTL: Record<VerificationTokenType, number> = {
   email_verification: 24 * 60 * 60 * 1000,
