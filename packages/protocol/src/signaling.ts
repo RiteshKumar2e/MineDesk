@@ -114,6 +114,28 @@ export const SessionDenyMessage = z.object({
   reason: z.enum(['user_declined', 'unattended_disabled', 'busy', 'policy']).default('user_declined'),
 });
 
+/**
+ * Server -> agent only, sent the moment a controller's own `session:join`
+ * is processed for this session.
+ *
+ * This exists to close a real race: the API pushes `session:invite` to the
+ * agent as soon as the session row is created, but the controller doesn't
+ * open its signaling socket and join until *after* that HTTP response comes
+ * back. An agent that accepts instantly (unattended access) and sends its
+ * offer right away can easily win that race, publishing the offer to a
+ * session channel with no subscriber yet - Redis pub/sub does not queue a
+ * publish for a channel nobody is listening on, so the offer is silently
+ * lost and the session hangs. An agent that waits for `session:ready`
+ * before generating its offer cannot lose this race, because by
+ * construction the controller is already joined (that is what triggered
+ * this message) by the time the offer is published.
+ */
+export const SessionReadyMessage = z.object({
+  ...base,
+  type: z.literal('session:ready'),
+  sessionId,
+});
+
 /** Either peer may end a session at any time. The local user always can. */
 export const SessionEndMessage = z.object({
   ...base,
@@ -266,6 +288,7 @@ export const ServerMessage = z.discriminatedUnion('type', [
   SessionAcceptMessage,
   SessionDenyMessage,
   SessionEndMessage,
+  SessionReadyMessage,
   OfferMessage,
   AnswerMessage,
   IceCandidateMessage,

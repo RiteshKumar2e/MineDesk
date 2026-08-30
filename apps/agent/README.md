@@ -32,10 +32,12 @@ clean. Files most likely to need adjustment, in descending order of risk:
 4. `src/video.rs` - depends on `openh264`'s `YUVSource` trait shape
 5. `src/session.rs` and `src/filetransfer.rs` - webrtc-rs closure/callback
    and `RTCDataChannel` method signatures (`on_message`, `send`/`send_text`,
-   `buffered_amount`), plus (session.rs only) whatever `create_offer`/
-   `add_track` require for a *second* negotiation on an already-connected
-   `RTCPeerConnection` - the renegotiation path camera/microphone use is
-   exercised nowhere else in this codebase
+   `buffered_amount`), whatever `create_offer`/`add_track` require for a
+   *second* negotiation on an already-connected `RTCPeerConnection` (used by
+   camera/microphone grants, reconnection, and ICE restart alike), and
+   specifically `on_ice_connection_state_change` plus `RTCOfferOptions`'s
+   exact field names (`ice_restart`, `voice_activity_detection`) for the
+   restart path - all exercised nowhere else in this codebase
 6. `src/clipboard.rs` - low risk; `arboard`'s API is small and stable
 7. everything else - ordinary async Rust (tokio, reqwest, serde) or pure
    logic with no FFI (`src/paths.rs`), lowest risk
@@ -136,10 +138,17 @@ These are honestly-scoped gaps, not oversights papered over:
   Foundation / NVENC) is a drop-in replacement for `video.rs`'s `H264Encoder`
   - nothing else needs to change, since `session.rs` only calls
   `encode_bgra` and expects Annex-B bytes back.
-- **No reconnect / ICE restart.** A network interruption ends the session
-  rather than recovering it. The signaling protocol already carries what a
-  restart needs (`webrtc:offer.restart`), so this is wiring, not a redesign -
-  tracked as Phase 6 in the root README.
+- **Reconnection and ICE restart are implemented** (Phase 6): a dropped
+  signaling WebSocket triggers `reconnect_signaling` (re-authenticate,
+  reconnect, backoff up to 10 attempts / ~5 minutes before giving up), which
+  re-joins any in-progress session and restarts ICE on it; the peer
+  connection also watches its own ICE state independently via
+  `on_ice_connection_state_change`, so a purely media-path disruption (no
+  signaling drop at all) recovers too, after an 8-second grace period in case
+  it self-heals first. Not implemented: resuming a session that was still
+  `pending` (nobody had approved it yet) across a reconnect - the invite
+  itself is not re-sent, so a signaling drop during the y/n prompt window
+  loses the pending invite rather than recovering it.
 - **Camera/microphone consent is console-based**, same as session invites -
   "The controller is requesting your CAMERA. Allow? [y/N]" printed to the
   terminal, 30 seconds to answer, defaulting to deny. A real always-visible,

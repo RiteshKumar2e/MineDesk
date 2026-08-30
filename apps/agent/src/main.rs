@@ -13,6 +13,14 @@
 //! planned but out of scope for this phase; see `apps/agent/README.md` for
 //! exactly what that would take to add without changing anything below
 //! main.rs.
+//!
+//! A dropped signaling connection does not end an active session: WebRTC
+//! media runs over its own sockets, independent of this WebSocket, so
+//! `run()`'s main loop reconnects with backoff (`reconnect_signaling`)
+//! rather than exiting, re-joins any session that was in progress, and
+//! triggers an ICE restart on it - see that function's doc comment. The
+//! peer connection also watches its own ICE state independently, so a purely
+//! media-path disruption (no signaling drop at all) still recovers.
 
 mod api;
 mod audio;
@@ -123,6 +131,53 @@ fn os_version() -> Option<String> {
     None
 }
 
+/// Re-authenticates (the old agent token may well have expired by the time a
+/// network blip is over) and reconnects the signaling WebSocket, with
+/// exponential backoff between attempts. Gives up after a bounded number of
+/// tries rather than retrying forever - a revoked device or a genuinely dead
+/// API host should surface as the agent exiting, not as it spinning quietly
+/// in the background until someone happens to notice the device never came
+/// back online.
+///
+/// On success, swaps the *contents* of `sender`'s mutex rather than
+/// returning a new `Arc` - every existing clone of `sender` (an active
+/// session's stored handle, its ICE-candidate callback, ...) already points
+/// at this same `Arc<Mutex<_>>`, so they all transparently start using the
+/// new connection without needing to be told about it individually.
+async fn reconnect_signaling(
+    client: &api::ApiClient,
+    config: &AgentConfig,
+    sender: &Arc<Mutex<SignalingSender>>,
+) -> Option<(mpsc::UnboundedReceiver<ServerFrame>, api::AuthResponse)> {
+    const MAX_ATTEMPTS: u32 = 10;
+    const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let backoff = Duration::from_secs(2u64.saturating_pow(attempt.min(6))).min(MAX_BACKOFF);
+        tokio::time::sleep(backoff).await;
+
+        let reconnected = async {
+            let auth = client.authenticate(&config.device_id, &config.agent_secret).await?;
+            let (new_sender, new_inbound) = signaling::connect(&auth.signal_url, &auth.token).await?;
+            Ok::<_, anyhow::Error>((new_sender, new_inbound, auth))
+        }
+        .await;
+
+        match reconnected {
+            Ok((new_sender, new_inbound, auth)) => {
+                *sender.lock().await = new_sender;
+                info!(attempt, "reconnected to signaling server");
+                return Some((new_inbound, auth));
+            }
+            Err(err) => {
+                warn!(attempt, error = %err, "reconnect attempt failed");
+            }
+        }
+    }
+
+    None
+}
+
 async fn run() -> Result<()> {
     let Some(config) = AgentConfig::load().context("loading agent configuration")? else {
         eprintln!("No enrollment found. Run:\n  minedesk-agent enroll --code ENR-XXXX-XXXX");
@@ -130,7 +185,7 @@ async fn run() -> Result<()> {
     };
 
     let client = api::ApiClient::new(&config.api_url);
-    let auth = client
+    let mut auth = client
         .authenticate(&config.device_id, &config.agent_secret)
         .await
         .context("agent authentication failed - was this device revoked?")?;
@@ -171,6 +226,12 @@ async fn run() -> Result<()> {
     // this phase's single-active-session console UI (see module doc comment).
     let mut pending_prompt: Option<PendingPrompt> = None;
     let mut prompt_deadline: Option<tokio::time::Instant> = None;
+    // Set when `session:ready` arrives for a session this agent hasn't
+    // finished accepting yet (the common case for a non-unattended prompt,
+    // since the controller usually joins long before a human answers y/n).
+    // Consumed the moment that session's ActiveSession is created - see
+    // accept_session's last argument.
+    let mut pending_ready: Option<String> = None;
 
     loop {
         // A `select!` branch is only polled when its guard is true, so this
@@ -235,7 +296,7 @@ async fn run() -> Result<()> {
                 if let Some(prompt) = pending_prompt.take() {
                     prompt_deadline = None;
                     if line == "y" {
-                        approve_prompt(&sender, &mut active, prompt, &agent_config).await;
+                        approve_prompt(&sender, &mut active, prompt, &agent_config, &mut pending_ready).await;
                     } else {
                         println!("Declined.");
                         deny_prompt(&sender, prompt).await;
@@ -289,8 +350,56 @@ async fn run() -> Result<()> {
 
             frame = inbound.recv() => {
                 let Some(frame) = frame else {
-                    error!("signaling connection closed; exiting so a service manager can restart this agent");
-                    return Ok(());
+                    // The signaling socket died - a network blip, not
+                    // necessarily anything wrong with an in-progress session:
+                    // WebRTC media runs over its own UDP sockets and keeps
+                    // going independently of this WebSocket, so an active
+                    // call is worth preserving through a reconnect rather
+                    // than torn down just because control-plane chatter
+                    // briefly has nowhere to go. `active`'s stored signaling
+                    // handle is the same `Arc<Mutex<SignalingSender>>` this
+                    // function holds, so reconnecting just needs to replace
+                    // what is inside that mutex - every existing clone
+                    // (session.rs's ICE-candidate callback included) picks
+                    // up the new connection automatically, with no need to
+                    // hand a new handle to anything that already has one.
+                    warn!("signaling connection lost; attempting to reconnect");
+                    print_status(&active);
+                    match reconnect_signaling(&client, &config, &sender).await {
+                        Some((new_inbound, new_auth)) => {
+                            inbound = new_inbound;
+                            auth = new_auth;
+                            heartbeat_interval = tokio::time::interval(Duration::from_millis(auth.heartbeat_interval_ms));
+
+                            // The new WebSocket is a brand new connection as
+                            // far as the server is concerned - it has no
+                            // memory that this device was joined to a
+                            // session, since that bookkeeping is per
+                            // connection, not per device. Any active session
+                            // has to be re-joined before this agent can send
+                            // more frames for it (a fresh ICE candidate, an
+                            // ICE-restart offer, ...). The signaling drop is
+                            // also a reasonable hint the network itself
+                            // changed underneath the call, so this also asks
+                            // for a full ICE restart rather than assuming the
+                            // old candidates are still good.
+                            if let Some(session) = active.as_ref() {
+                                if let Err(err) = sender.lock().await.send(&ClientFrame::session_join(session.session_id.clone())).await {
+                                    warn!(error = %err, "failed to re-join active session after reconnect");
+                                } else if let Err(err) = session.restart_ice().await {
+                                    warn!(error = %err, "failed to restart ICE after reconnect");
+                                }
+                            }
+
+                            println!("Status: reconnected");
+                            print_status(&active);
+                        }
+                        None => {
+                            error!("giving up on reconnecting to the signaling server; exiting so a service manager can restart this agent");
+                            return Ok(());
+                        }
+                    }
+                    continue;
                 };
 
                 match frame {
@@ -313,7 +422,7 @@ async fn run() -> Result<()> {
 
                         if unattended {
                             println!("Incoming session from {} <{}> (unattended access) - accepting.", controller.name, controller.email);
-                            accept_session(&sender, &mut active, session_id, capabilities, &agent_config).await;
+                            accept_session(&sender, &mut active, session_id, capabilities, &agent_config, &mut pending_ready).await;
                             print_status(&active);
                         } else {
                             println!(
@@ -332,6 +441,22 @@ async fn run() -> Result<()> {
                             }
                             println!("Session ended.");
                             print_status(&active);
+                        }
+                    }
+
+                    ServerFrame::SessionReady { session_id } => {
+                        // Whichever arrives second wins: either this session
+                        // is already accepted (send the offer right now,
+                        // including on a browser reconnect that re-joins and
+                        // wants a fresh one), or it isn't yet (remember it,
+                        // consumed the moment accept_session finishes - see
+                        // that function's last argument).
+                        if let Some(session) = active.as_ref().filter(|s| s.session_id == session_id) {
+                            if let Err(err) = session.renegotiate().await {
+                                warn!(error = %err, "failed to send offer after session:ready");
+                            }
+                        } else {
+                            pending_ready = Some(session_id);
                         }
                     }
 
@@ -425,6 +550,7 @@ async fn accept_session(
     session_id: String,
     capabilities: Vec<String>,
     agent_config: &api::AgentConfigResponse,
+    pending_ready: &mut Option<String>,
 ) {
     let effective_capabilities: Vec<String> = capabilities
         .into_iter()
@@ -447,16 +573,30 @@ async fn accept_session(
     let shared_folders = agent_config.shared_folders.clone();
 
     match session::start(session_id.clone(), ice_servers, session_capabilities, shared_folders, sender.clone()).await {
-        Ok((session, sdp, dimensions)) => {
+        Ok((session, dimensions)) => {
             let accept = ClientFrame::session_accept(session_id.clone(), session::primary_screen_info(dimensions));
             if let Err(err) = sender.lock().await.send(&accept).await {
                 warn!(error = %err, "failed to send session:accept");
             }
-            let offer = ClientFrame::webrtc_offer(session_id, sdp);
-            if let Err(err) = sender.lock().await.send(&offer).await {
-                warn!(error = %err, "failed to send webrtc:offer");
-            }
+
+            // The offer is only safe to publish once the controller has
+            // joined the session channel - see SessionReadyMessage's doc
+            // comment. If that already happened while this session was
+            // still being decided (the ordinary case for a non-unattended
+            // prompt, since the controller usually joins well within the
+            // 30 seconds a human takes to answer), send it right away
+            // instead of waiting for a `session:ready` that already came
+            // and went.
+            let ready_already = pending_ready.as_deref() == Some(session_id.as_str());
             *active = Some(session);
+            if ready_already {
+                *pending_ready = None;
+                if let Some(session) = active.as_ref() {
+                    if let Err(err) = session.renegotiate().await {
+                        warn!(error = %err, "failed to send initial offer");
+                    }
+                }
+            }
         }
         Err(err) => {
             error!(error = %err, "failed to start session");
@@ -479,10 +619,11 @@ async fn approve_prompt(
     active: &mut Option<ActiveSession>,
     prompt: PendingPrompt,
     agent_config: &api::AgentConfigResponse,
+    pending_ready: &mut Option<String>,
 ) {
     match prompt {
         PendingPrompt::SessionInvite { session_id, capabilities } => {
-            accept_session(sender, active, session_id, capabilities, agent_config).await;
+            accept_session(sender, active, session_id, capabilities, agent_config, pending_ready).await;
         }
         PendingPrompt::CapabilityRequest { session_id, request_id, capability } => {
             let Some(session) = active.as_mut().filter(|s| s.session_id == session_id) else {

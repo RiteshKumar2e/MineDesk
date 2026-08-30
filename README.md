@@ -11,12 +11,13 @@ remote control all require explicit, revocable authorization, and the person
 at the remote machine always sees a visible indicator and a way to disconnect.
 
 This repository is being built in phases (see [Roadmap](#roadmap)). **Phases
-1 through 5 are in this commit**: Foundation/Authentication/Device
+1 through 6 are in this commit**: Foundation/Authentication/Device
 Registration, Remote Agent + WebRTC screen/input streaming, clipboard sync +
 remote audio + file transfer, camera/microphone with a live consent prompt
-and an always-on indicator, and now a real unattended-access password plus
-genuine access history. The Rust agent has not been compiled in the
-environment it was written in (no Rust toolchain available there) - see
+and an always-on indicator, a real unattended-access password plus genuine
+access history, and now the invite race fixed plus signaling reconnect and
+ICE restart. The Rust agent has not been compiled in the environment it was
+written in (no Rust toolchain available there) - see
 [Phase 2 status](#phase-2-status) below before relying on it; that section
 covers every later phase's agent-side additions too.
 
@@ -267,9 +268,52 @@ person by email, assigning them a role, revoking just them rather than
 rotating the shared password), and a persistent (DB-backed, not Redis-only)
 record of unattended-lockout events.
 
+## What's implemented in Phase 6
+
+This phase closes the invite race documented (until now) in
+[Phase 2 status](#phase-2-status) below, and adds reconnection/ICE-restart -
+the two concrete, code-level items from this phase's original scope.
+TURN-in-production, horizontal scaling and monitoring/deployment were mostly
+already true by construction (stateless API, Redis-backed presence and
+rate limiting, ephemeral TURN credentials since Phase 1) rather than needing
+new code; see [Deployment](#deployment-forward-looking) for what's left
+there, which is infrastructure rather than application code.
+
+**The invite race is fixed.** A new server-only signaling message,
+`session:ready`, is published to a session's channel the moment the
+*controller's* `session:join` is processed - which the agent, already
+subscribed to that channel since the moment it received the invite, is
+guaranteed to see. The agent no longer generates its offer immediately on
+accept; it waits for `session:ready` (immediately, if that arrives first -
+the ordinary case for a non-unattended prompt, since a human typically takes
+much longer than 30 seconds to answer than the browser takes to connect and
+join) before ever publishing anything to the session channel. This makes the
+race structurally impossible rather than merely unlikely: the agent cannot
+publish to a channel it hasn't confirmed has a listener on.
+
+**Reconnection.** A dropped signaling WebSocket no longer ends the agent
+process or any session in progress - `apps/agent/README.md`'s Known
+Limitations previously called this out explicitly; see that file for what's
+still not covered (a session still awaiting approval when signaling drops
+does not resume automatically). WebRTC media runs over its own sockets
+independent of this WebSocket, so an active call is worth preserving through
+a reconnect attempt (re-authenticate, reconnect, backoff up to ~5 minutes)
+rather than torn down on the first blip.
+
+**ICE restart.** Two triggers, one mechanism (`session.rs`'s
+`perform_ice_restart`, shared so there is exactly one implementation to get
+right): a successful signaling reconnect proactively restarts ICE on any
+active session (a dropped signaling connection is itself a reasonable signal
+the network changed), and the peer connection independently watches its own
+ICE state, restarting after an 8-second grace period if a `disconnected`/
+`failed` state doesn't clear on its own first. The browser's existing offer
+handling needed no changes to receive either kind of restart - applying a
+renegotiated remote description is the same code path whether or not it
+happens to carry fresh ICE credentials.
+
 ## Phase 2 status
 
-The TypeScript side of Phases 2 through 4 (the session-creation endpoint, the
+The TypeScript side of Phases 2 through 6 (the session-creation endpoint, the
 `/remote/:sessionId` page, the file manager panel, the shared-folders editor,
 the camera/microphone request UI) is typechecked and built exactly like
 Phase 1 - see [Testing locally](#testing-locally).
@@ -310,18 +354,10 @@ running as a normal console process (today) cannot do yet - true unattended
 access when nobody is logged in, and Ctrl+Alt+Del - both of which need
 Windows service mode, which is scoped but not built.
 
-One additional architectural gap worth knowing about even once the agent
-compiles: there is a race between the browser creating a session (which
-immediately pushes an invite to the agent) and the browser finishing its own
-WebSocket connect-and-join. If the agent is fast enough - which unattended
-auto-accept, running on the same host as a low-latency API, usually is - it
-can send its offer before the browser has joined the session's signaling
-channel, and Redis pub/sub does not queue a publish for a channel with no
-subscriber yet, so that offer is silently lost and the session hangs at
-"waiting for approval" until the browser's own client-side timeout gives up.
-Closing this needs either the browser to join before the session even exists,
-or the agent to hold its offer until the API confirms the controller has
-joined - neither is implemented yet.
+~~One additional architectural gap worth knowing about even once the agent
+compiles: there is a race between the browser creating a session and the
+browser finishing its own WebSocket connect-and-join.~~ **Fixed in Phase 6** -
+see [What's implemented in Phase 6](#whats-implemented-in-phase-6).
 
 ## Prerequisites
 
@@ -520,8 +556,12 @@ and the frame parser are all wired correctly independent of the agent.
   indicators~~ - built; see [What's implemented in Phase 4](#whats-implemented-in-phase-4).
 - ~~**Phase 5** - Deeper unattended-access management, access history, security
   hardening pass~~ - built; see [What's implemented in Phase 5](#whats-implemented-in-phase-5).
-- **Phase 6** - TURN in production, reconnection/ICE-restart handling,
-  horizontal scaling, monitoring, deployment
+- ~~**Phase 6** - TURN in production, reconnection/ICE-restart handling,
+  horizontal scaling, monitoring, deployment~~ - the code-level parts (invite
+  race, reconnection, ICE restart) are built; see
+  [What's implemented in Phase 6](#whats-implemented-in-phase-6). Actually
+  standing up TURN/monitoring infrastructure for a real deployment is still
+  ahead, as it always was - see [Deployment](#deployment-forward-looking).
 
 ## Deployment (forward-looking)
 

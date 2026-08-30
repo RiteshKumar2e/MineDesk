@@ -202,6 +202,18 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
             sessionId: message.sessionId,
             status: session.status,
           });
+
+          // Tell the agent it is now safe to publish its offer: publishing
+          // any earlier than this is a race an agent that accepts instantly
+          // (unattended access) can and does lose - see SessionReadyMessage's
+          // doc comment in packages/protocol/src/signaling.ts.
+          if (connection.role === 'controller') {
+            await hub.sendToSession(message.sessionId, {
+              v: PROTOCOL_VERSION,
+              type: 'session:ready',
+              sessionId: message.sessionId,
+            });
+          }
           return;
         }
 

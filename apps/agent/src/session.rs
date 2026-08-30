@@ -35,9 +35,11 @@ use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit}
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
@@ -283,15 +285,32 @@ impl ActiveSession {
         }
     }
 
-    async fn renegotiate(&self) -> Result<()> {
-        let offer = self.peer_connection.create_offer(None).await.context("creating renegotiation offer")?;
-        self.peer_connection.set_local_description(offer.clone()).await.context("setting renegotiated local description")?;
+    /// Generates a fresh offer and sends it. Used both for the session's
+    /// very first offer (once `session:ready` confirms the controller has
+    /// joined - see `main.rs`) and for every later renegotiation (adding a
+    /// camera/microphone track); WebRTC does not distinguish an initial
+    /// offer from a renegotiation at the API level, so neither does this.
+    pub async fn renegotiate(&self) -> Result<()> {
+        let offer = self.peer_connection.create_offer(None).await.context("creating SDP offer")?;
+        self.peer_connection.set_local_description(offer.clone()).await.context("setting local description")?;
         self.signaling
             .lock()
             .await
             .send(&ClientFrame::webrtc_offer(self.session_id.clone(), offer.sdp))
             .await
-            .context("sending renegotiation offer")
+            .context("sending SDP offer")
+    }
+
+    /// Generates a fresh offer with new ICE credentials (`iceRestart: true`)
+    /// and sends it - the recovery step after the transport degrades (a
+    /// network change, a NAT rebinding, the signaling socket itself dropping
+    /// and coming back). The browser's existing offer handling needs no
+    /// changes to receive this: applying a renegotiated remote description
+    /// is the same code path whether or not it happens to carry new ICE
+    /// credentials, and answering it is what actually re-establishes
+    /// connectivity.
+    pub async fn restart_ice(&self) -> Result<()> {
+        perform_ice_restart(&self.peer_connection, &self.signaling, &self.session_id).await
     }
 
     async fn broadcast_capability_state(&self) {
@@ -310,16 +329,21 @@ impl ActiveSession {
 
 /// Builds the peer connection, adds whatever tracks and data channels this
 /// session's capabilities allow, and starts their feeder tasks. Returns the
-/// session handle, the SDP offer to send to the controller, and the screen
-/// dimensions if screen sharing is enabled (used to report screen info back
-/// to the controller in `session:accept`).
+/// session handle and the screen dimensions if screen sharing is enabled
+/// (used to report screen info back to the controller in `session:accept`).
+///
+/// Deliberately does *not* generate or send the initial SDP offer - the
+/// caller (`main.rs`) does that via `ActiveSession::renegotiate()` only
+/// after `session:ready` confirms the controller has joined the signaling
+/// channel. Publishing an offer any earlier is exactly the race documented
+/// on `SessionReadyMessage` in `packages/protocol/src/signaling.ts`.
 pub async fn start(
     session_id: String,
     ice_servers: Vec<RTCIceServer>,
     capabilities: SessionCapabilities,
     shared_folders: Vec<String>,
     signaling: Arc<Mutex<SignalingSender>>,
-) -> Result<(ActiveSession, String, Option<(u32, u32)>)> {
+) -> Result<(ActiveSession, Option<(u32, u32)>)> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().context("registering default WebRTC codecs")?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
@@ -418,6 +442,50 @@ pub async fn start(
         Box::pin(async {})
     }));
 
+    // A network change (Wi-Fi to cellular, a NAT rebinding, a router
+    // hiccup) shows up here as 'disconnected' before it necessarily takes
+    // the signaling socket down too - waiting for that would miss the case
+    // where only the media path is affected. A grace period first, since
+    // ICE frequently recovers a 'disconnected' pair on its own within a few
+    // seconds without any help; only a restart that is *still* disconnected
+    // when the timer fires actually renegotiates. `restart_scheduled` stops
+    // a flapping connection from queuing up an unbounded pile of these.
+    let restart_scheduled = Arc::new(AtomicBool::new(false));
+    let pc_for_restart = peer_connection.clone();
+    let signaling_for_restart = signaling.clone();
+    let session_id_for_restart = session_id.clone();
+    peer_connection.on_ice_connection_state_change(Box::new(move |state: RTCIceConnectionState| {
+        let pc = pc_for_restart.clone();
+        let signaling = signaling_for_restart.clone();
+        let session_id = session_id_for_restart.clone();
+        let restart_scheduled = restart_scheduled.clone();
+        Box::pin(async move {
+            if !matches!(state, RTCIceConnectionState::Disconnected | RTCIceConnectionState::Failed) {
+                return;
+            }
+            if restart_scheduled.swap(true, Ordering::Relaxed) {
+                return; // a restart is already pending from an earlier disconnect
+            }
+
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(8)).await;
+                restart_scheduled.store(false, Ordering::Relaxed);
+
+                let still_down = matches!(
+                    pc.ice_connection_state(),
+                    RTCIceConnectionState::Disconnected | RTCIceConnectionState::Failed
+                );
+                if !still_down {
+                    return; // recovered on its own - no ICE restart needed
+                }
+
+                if let Err(err) = perform_ice_restart(&pc, &signaling, &session_id).await {
+                    warn!(session_id = %session_id, error = %err, "failed to restart ICE after disconnection");
+                }
+            });
+        })
+    }));
+
     let session_id_for_ice = session_id.clone();
     let signaling_for_ice = signaling.clone();
     peer_connection.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
@@ -433,11 +501,6 @@ pub async fn start(
         })
     }));
 
-    // --- offer ------------------------------------------------------------
-    let offer = peer_connection.create_offer(None).await.context("creating SDP offer")?;
-    peer_connection.set_local_description(offer.clone()).await.context("setting local description")?;
-    let sdp = offer.sdp.clone();
-
     Ok((
         ActiveSession {
             session_id,
@@ -451,7 +514,6 @@ pub async fn start(
             file_transfer,
             clipboard_sync,
         },
-        sdp,
         dimensions,
     ))
 }
@@ -714,4 +776,20 @@ pub fn primary_screen_info(dimensions: Option<(u32, u32)>) -> Vec<ScreenInfo> {
         Some((width, height)) => vec![ScreenInfo { id: "0".to_string(), label: "Primary display".to_string(), width, height, primary: true }],
         None => vec![],
     }
+}
+
+/// Shared by `ActiveSession::restart_ice` and the proactive disconnect
+/// watcher registered in `start()` - the watcher runs from a closure that
+/// exists before there is a `Self` to call a method on, so this takes its
+/// three ingredients directly rather than being a method both call into.
+async fn perform_ice_restart(pc: &RTCPeerConnection, signaling: &Mutex<SignalingSender>, session_id: &str) -> Result<()> {
+    let options = RTCOfferOptions { ice_restart: true, voice_activity_detection: false };
+    let offer = pc.create_offer(Some(options)).await.context("creating ICE-restart offer")?;
+    pc.set_local_description(offer.clone()).await.context("setting restarted local description")?;
+    signaling
+        .lock()
+        .await
+        .send(&ClientFrame::webrtc_restart_offer(session_id.to_string(), offer.sdp))
+        .await
+        .context("sending ICE-restart offer")
 }

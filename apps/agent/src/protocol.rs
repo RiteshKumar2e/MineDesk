@@ -49,6 +49,15 @@ pub enum ServerFrame {
         #[serde(default)]
         reason: Option<String>,
     },
+    /// Sent once the controller has joined the session on the signaling
+    /// channel - see the doc comment on `SessionReadyMessage` in
+    /// `packages/protocol/src/signaling.ts` for the race this closes. The
+    /// agent must not publish its offer before this arrives.
+    #[serde(rename = "session:ready")]
+    SessionReady {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
     #[serde(rename = "webrtc:answer")]
     WebrtcAnswer {
         #[serde(rename = "sessionId")]
@@ -216,6 +225,13 @@ impl ClientFrame {
 
     pub fn webrtc_offer(session_id: String, sdp: String) -> Self {
         ClientFrame::WebrtcOffer { v: PROTOCOL_VERSION, session_id, sdp, restart: false }
+    }
+
+    /// An offer generated with `iceRestart: true` - new ICE credentials, so
+    /// the far end knows to renegotiate the transport rather than treat this
+    /// as an ordinary track/data-channel change.
+    pub fn webrtc_restart_offer(session_id: String, sdp: String) -> Self {
+        ClientFrame::WebrtcOffer { v: PROTOCOL_VERSION, session_id, sdp, restart: true }
     }
 
     pub fn webrtc_ice(session_id: String, candidate: String, sdp_mid: Option<String>, sdp_mline_index: Option<u16>) -> Self {
