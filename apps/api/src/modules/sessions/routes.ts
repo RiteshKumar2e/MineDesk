@@ -4,10 +4,13 @@ import { generateSessionId } from '@minedesk/shared/ids';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
+import { verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
 import { buildIceServers } from '../../lib/ice.js';
 import { getPresence, isDeviceOnline } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
+import { clearUnattendedFailures, isUnattendedAccessLocked, recordUnattendedFailure } from '../../lib/unattendedLockout.js';
+import { STRICT_LIMITS } from '../../plugins/security.js';
 import { permissionsOf } from '../devices/service.js';
 import { hub } from '../signaling/hub.js';
 
@@ -19,6 +22,23 @@ const listQuery = z.object({
 const createSessionSchema = z.object({
   /** Human-shareable device id, e.g. RMT-8F32-A91C - what the user types in. */
   deviceId: z.string().trim().min(6).max(32),
+  /**
+   * Required only when the caller does not own the device. This is what
+   * "unattended access" actually authorizes in this platform: the owner can
+   * always connect to their own device, but anyone else needs this password,
+   * set explicitly by the owner (PUT /devices/:id/unattended), in addition
+   * to already being an authenticated MineDesk user.
+   */
+  unattendedPassword: z.string().max(200).optional(),
+});
+
+const activitySchema = z.object({
+  connectionType: z.enum(['direct', 'relay']).optional(),
+  usedCamera: z.literal(true).optional(),
+  usedMicrophone: z.literal(true).optional(),
+  usedAudio: z.literal(true).optional(),
+  usedClipboard: z.literal(true).optional(),
+  usedFiles: z.literal(true).optional(),
 });
 
 /**
@@ -48,14 +68,61 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
    * /signal, sending session:join, and then handling whatever the agent
    * decides (session:accept, session:deny, or silence if it never answers).
    */
-  app.post('/', async (request, reply) => {
+  app.post('/', { config: { rateLimit: STRICT_LIMITS.sessionCreate } }, async (request, reply) => {
     const input = createSessionSchema.parse(request.body);
+    const { ipAddress, userAgent } = auditRequestContext(request);
 
+    // Deliberately not scoped to the caller's own devices: a device the
+    // caller does not own can still be reachable, via the unattended
+    // password path below. Ownership is checked explicitly next, not baked
+    // into the query, precisely so that path has something to fall through to.
     const device = await prisma.device.findFirst({
-      where: { deviceId: input.deviceId, userId: request.user!.id },
+      where: { deviceId: input.deviceId },
       include: { permissions: true },
     });
     if (!device || device.revokedAt || !device.agentSecretHash) throw new AppError(ErrorCode.DEVICE_NOT_FOUND);
+
+    const isOwner = device.userId === request.user!.id;
+
+    if (!isOwner) {
+      // Same error for "no such device" and "not authorized" up to this
+      // point is not needed here - the caller already knows this device
+      // exists (they typed a valid ID) - but the specific reason for
+      // refusal below still must not distinguish "wrong password" from
+      // "unattended access is off" any more than necessary, so both are
+      // UNATTENDED_PASSWORD_INVALID.
+      if (!device.unattendedAccessEnabled || !device.unattendedPasswordHash) {
+        throw new AppError(ErrorCode.UNATTENDED_ACCESS_DISABLED);
+      }
+      if (await isUnattendedAccessLocked(device.deviceId)) {
+        throw new AppError(ErrorCode.UNATTENDED_PASSWORD_INVALID, {
+          message: 'Too many incorrect attempts. Try again later.',
+        });
+      }
+      const provided = input.unattendedPassword ?? '';
+      const valid = provided.length > 0 && (await verifyPassword(device.unattendedPasswordHash, provided));
+
+      if (!valid) {
+        const justLocked = await recordUnattendedFailure(device.deviceId);
+        await recordAudit({
+          userId: request.user!.id,
+          deviceId: device.id,
+          action: justLocked
+            ? AuditAction.SESSION_UNATTENDED_PASSWORD_LOCKED
+            : AuditAction.SESSION_UNATTENDED_PASSWORD_REJECTED,
+          ipAddress,
+        });
+        throw new AppError(ErrorCode.UNATTENDED_PASSWORD_INVALID);
+      }
+
+      await clearUnattendedFailures(device.deviceId);
+      await recordAudit({
+        userId: request.user!.id,
+        deviceId: device.id,
+        action: AuditAction.SESSION_UNATTENDED_PASSWORD_ACCEPTED,
+        ipAddress,
+      });
+    }
 
     if (!(await isDeviceOnline(device.deviceId))) throw new AppError(ErrorCode.DEVICE_OFFLINE);
 
@@ -74,7 +141,6 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const sessionId = generateSessionId();
-    const { ipAddress, userAgent } = auditRequestContext(request);
 
     const session = await prisma.remoteSession.create({
       data: {
@@ -95,7 +161,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       action: AuditAction.SESSION_REQUESTED,
       ipAddress,
       userAgent,
-      metadata: { sessionId, unattended: device.unattendedAccessEnabled, capabilities },
+      metadata: { sessionId, unattended: device.unattendedAccessEnabled, viaUnattendedPassword: !isOwner, capabilities },
     });
 
     // The agent decides accept/deny for itself (see modules/signaling/routes.ts);
@@ -159,6 +225,9 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
               : null,
         usedCamera: session.usedCamera,
         usedMicrophone: session.usedMicrophone,
+        usedAudio: session.usedAudio,
+        usedClipboard: session.usedClipboard,
+        usedFiles: session.usedFiles,
         endReason: session.endReason,
       })),
     });
@@ -209,6 +278,44 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       action: AuditAction.SESSION_ENDED,
       ...auditRequestContext(request),
       metadata: { reason: 'terminated_by_user' },
+    });
+
+    return reply.send({ ok: true });
+  });
+
+  /**
+   * The browser reports what actually happened during a session - which
+   * connection path was used, which optional capabilities were actually
+   * exercised - since none of that is visible to the API from the signaling
+   * relay alone (WebRTC media and the DataChannels it carries clipboard and
+   * file transfer over never touch the server). This is what makes the
+   * device's access history in the dashboard more than a list of start/end
+   * timestamps.
+   *
+   * Each `used*` flag is a one-way latch: the schema only accepts `true`, so
+   * a stale or out-of-order report can move a flag from false to true but
+   * can never un-report something that did happen.
+   */
+  app.patch('/:sessionId/activity', async (request, reply) => {
+    const { sessionId } = z.object({ sessionId: z.string().max(32) }).parse(request.params);
+    const input = activitySchema.parse(request.body);
+
+    const session = await prisma.remoteSession.findFirst({
+      where: { sessionId, userId: request.user!.id },
+      select: { id: true },
+    });
+    if (!session) throw new AppError(ErrorCode.SESSION_NOT_FOUND);
+
+    await prisma.remoteSession.update({
+      where: { id: session.id },
+      data: {
+        ...(input.connectionType ? { connectionType: input.connectionType } : {}),
+        ...(input.usedCamera ? { usedCamera: true } : {}),
+        ...(input.usedMicrophone ? { usedMicrophone: true } : {}),
+        ...(input.usedAudio ? { usedAudio: true } : {}),
+        ...(input.usedClipboard ? { usedClipboard: true } : {}),
+        ...(input.usedFiles ? { usedFiles: true } : {}),
+      },
     });
 
     return reply.send({ ok: true });

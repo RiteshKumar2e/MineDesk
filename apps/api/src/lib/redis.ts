@@ -34,6 +34,8 @@ export const REDIS_KEYS = {
   deviceChannel: (deviceId: string) => `signal:device:${deviceId}`,
   sessionChannel: (sessionId: string) => `signal:session:${sessionId}`,
   loginAttempts: (email: string) => `ratelimit:login:${email.toLowerCase()}`,
+  unattendedAttempts: (deviceId: string) => `ratelimit:unattended:${deviceId}`,
+  unattendedLockout: (deviceId: string) => `lockout:unattended:${deviceId}`,
   revokedJti: (jti: string) => `revoked:jti:${jti}`,
 } as const;
 

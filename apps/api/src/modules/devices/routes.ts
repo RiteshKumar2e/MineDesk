@@ -155,10 +155,23 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
         status: session.status,
         startedAt: (session.startedAt ?? session.requestedAt).toISOString(),
         endedAt: session.endedAt?.toISOString() ?? null,
+        durationMs:
+          session.startedAt && session.endedAt
+            ? session.endedAt.getTime() - session.startedAt.getTime()
+            : session.startedAt
+              ? Date.now() - session.startedAt.getTime()
+              : null,
         userEmail: session.user.email,
+        userName: session.user.name,
+        unattended: session.unattended,
         connectionType: session.connectionType,
         endReason: session.endReason,
         capabilities: session.grantedCapabilities,
+        usedCamera: session.usedCamera,
+        usedMicrophone: session.usedMicrophone,
+        usedAudio: session.usedAudio,
+        usedClipboard: session.usedClipboard,
+        usedFiles: session.usedFiles,
       })),
     });
   });
@@ -172,11 +185,47 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       select: { id: true, email: true, name: true },
     });
 
-    // Phase 1 is single-owner. Team sharing lands in a later phase, and this
-    // shape is already the list the UI renders.
+    // Full multi-user sharing (inviting a specific person, assigning them a
+    // role) is still a later phase. What exists today is the unattended
+    // password: anyone who authenticates as themselves and knows it can
+    // connect without being on any list. That makes *who has actually used
+    // it* the meaningful "access" question to answer here in the meantime -
+    // computed from real connection history rather than a membership table
+    // that doesn't exist yet.
+    const nonOwnerSessions = await prisma.remoteSession.groupBy({
+      by: ['userId'],
+      where: { deviceId: device.id, userId: { not: device.userId } },
+      _count: { _all: true },
+      _max: { requestedAt: true },
+    });
+
+    const recentConnectors = nonOwnerSessions.length
+      ? await prisma.user.findMany({
+          where: { id: { in: nonOwnerSessions.map((s) => s.userId) } },
+          select: { id: true, email: true, name: true },
+        })
+      : [];
+
+    const recentConnections = nonOwnerSessions
+      .map((s) => {
+        const user = recentConnectors.find((u) => u.id === s.userId);
+        return user
+          ? {
+              ...user,
+              sessionCount: s._count._all,
+              lastConnectedAt: s._max.requestedAt?.toISOString() ?? null,
+            }
+          : null;
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      .sort((a, b) => (b.lastConnectedAt ?? '').localeCompare(a.lastConnectedAt ?? ''));
+
     return reply.send({
       authorizedUsers: owner ? [{ ...owner, role: 'owner', addedAt: device.createdAt.toISOString() }] : [],
       unattendedAccessEnabled: device.unattendedAccessEnabled,
+      // Only ever non-empty when unattended access has been used by someone
+      // other than the owner - i.e. the password was shared and used.
+      recentConnections,
     });
   });
 }

@@ -1,17 +1,25 @@
 import { useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { StatusDot } from '../components/StatusDot';
 import { ApiError } from '../lib/apiClient';
 import { useCreateDevice, useDevices } from '../lib/deviceQueries';
+import { useCreateSession } from '../lib/sessionQueries';
 
 export default function DevicesPage() {
   const { data, isLoading, error } = useDevices();
   const createDevice = useCreateDevice();
+  const createSession = useCreateSession();
+  const navigate = useNavigate();
 
   const [showAdd, setShowAdd] = useState(false);
   const [name, setName] = useState('');
   const [enrollment, setEnrollment] = useState<{ code: string; command: string; expiresAt: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+
+  const [showConnect, setShowConnect] = useState(false);
+  const [connectId, setConnectId] = useState('');
+  const [connectPassword, setConnectPassword] = useState('');
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   async function handleAdd(e: FormEvent) {
     e.preventDefault();
@@ -25,6 +33,20 @@ export default function DevicesPage() {
     }
   }
 
+  async function handleConnect(e: FormEvent) {
+    e.preventDefault();
+    setConnectError(null);
+    try {
+      const res = await createSession.mutateAsync({
+        deviceId: connectId.trim().toUpperCase(),
+        unattendedPassword: connectPassword || undefined,
+      });
+      navigate(`/remote/${res.sessionId}`);
+    } catch (err) {
+      setConnectError(err instanceof ApiError ? err.message : 'Could not start a session.');
+    }
+  }
+
   return (
     <div>
       <div className="mb-6 flex items-center justify-between">
@@ -34,10 +56,67 @@ export default function DevicesPage() {
             Computers you can remotely access once the agent is installed and authorized.
           </p>
         </div>
-        <button type="button" className="btn-primary" onClick={() => setShowAdd(true)}>
-          + Add device
-        </button>
+        <div className="flex gap-2">
+          <button type="button" className="btn-secondary" onClick={() => setShowConnect(true)}>
+            Connect to a device
+          </button>
+          <button type="button" className="btn-primary" onClick={() => setShowAdd(true)}>
+            + Add device
+          </button>
+        </div>
       </div>
+
+      {showConnect && (
+        <div className="card mb-6 p-5">
+          <h2 className="mb-1 font-medium">Connect to a device</h2>
+          <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+            For one of your own devices, use its Connect button below instead. This is for a device someone
+            else shared with you - you'll need its ID and the unattended access password they gave you.
+          </p>
+          <form onSubmit={handleConnect} className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="label" htmlFor="connect-id">
+                Device ID
+              </label>
+              <input
+                id="connect-id"
+                className="input font-mono uppercase"
+                placeholder="RMT-XXXX-XXXX"
+                required
+                value={connectId}
+                onChange={(e) => setConnectId(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="connect-password">
+                Access password
+              </label>
+              <input
+                id="connect-password"
+                type="password"
+                className="input"
+                placeholder="Leave blank for your own devices"
+                value={connectPassword}
+                onChange={(e) => setConnectPassword(e.target.value)}
+              />
+            </div>
+            <button type="submit" className="btn-primary" disabled={createSession.isPending}>
+              {createSession.isPending ? 'Connecting...' : 'Connect'}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => {
+                setShowConnect(false);
+                setConnectError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </form>
+          {connectError && <p className="mt-2 text-sm text-red-600">{connectError}</p>}
+        </div>
+      )}
 
       {showAdd && (
         <div className="card mb-6 p-5">

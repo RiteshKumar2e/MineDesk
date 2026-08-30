@@ -11,11 +11,12 @@ remote control all require explicit, revocable authorization, and the person
 at the remote machine always sees a visible indicator and a way to disconnect.
 
 This repository is being built in phases (see [Roadmap](#roadmap)). **Phases
-1 through 4 are in this commit**: Foundation/Authentication/Device
+1 through 5 are in this commit**: Foundation/Authentication/Device
 Registration, Remote Agent + WebRTC screen/input streaming, clipboard sync +
-remote audio + file transfer, and now camera/microphone with a live consent
-prompt and an always-on indicator. The Rust agent has not been compiled in
-the environment it was written in (no Rust toolchain available there) - see
+remote audio + file transfer, camera/microphone with a live consent prompt
+and an always-on indicator, and now a real unattended-access password plus
+genuine access history. The Rust agent has not been compiled in the
+environment it was written in (no Rust toolchain available there) - see
 [Phase 2 status](#phase-2-status) below before relying on it; that section
 covers every later phase's agent-side additions too.
 
@@ -213,6 +214,58 @@ output stands in, as documented since Phase 2), device selection when more
 than one camera/microphone exists, and actually removing the WebRTC track on
 stop rather than just halting capture - see `apps/agent/README.md`'s Known
 Limitations for the reasoning on that last one.
+
+## What's implemented in Phase 5
+
+This phase is mostly about closing gaps left open by earlier ones rather than
+adding new surface area - notably, the unattended-access password did not
+actually gate anything until now, and several `RemoteSession` columns had
+been in the schema since Phase 1 without anything ever writing to them.
+
+**Unattended access now actually authorizes non-owners.** Previously,
+`POST /api/v1/sessions` only ever checked that the caller owned the device -
+the stored `unattendedPasswordHash` was set by the UI but never verified
+anywhere, so there was no way for anyone but the owner to connect regardless
+of the password. Now:
+- The device owner can always connect with no password, exactly as before
+- Anyone else who is an authenticated MineDesk user can connect if
+  `unattendedAccessEnabled` is on and they supply the correct password -
+  this is what "share this password with a colleague" is supposed to mean,
+  and it now does something
+- Wrong attempts are rate-limited and rejected with the same error whether
+  the reason is "wrong password" or "unattended access is off," so this
+  endpoint cannot be used to probe a device's configuration; five wrong
+  attempts locks the *device* (not the caller's account - a different caller
+  trying next should not get a fresh budget) for 15 minutes, tracked in
+  Redis the same way login lockout is tracked
+- A new **"Connect to a device"** flow on `/devices` lets any signed-in user
+  enter a device ID and password directly, separate from "Add device" (which
+  enrolls a new agent under *your* account)
+
+**Access history is now real**, not placeholder. `usedCamera`,
+`usedMicrophone`, `usedAudio`, `usedClipboard`, `usedFiles` and
+`connectionType` existed as columns since Phase 1 but nothing ever set them,
+because none of that activity is visible to the API - it all happens over
+peer-to-peer WebRTC. The browser now reports it explicitly via
+`PATCH /api/v1/sessions/:sessionId/activity` (each `used*` flag is a
+one-way latch - the endpoint can only ever set one to true, never back to
+false) at the moments that information becomes available: `connectionType`
+by inspecting `RTCPeerConnection.getStats()` for the selected candidate
+pair's type once ICE connects, and each `used*` flag the first time that
+capability is actually exercised. The device detail page's session list
+shows all of it - duration, connection type, unattended vs. interactive, and
+which capabilities were used, per session.
+- Non-owner connections now show up under **"Connected via access
+  password"** on the device page, computed from real session history
+  grouped by user - not a membership table (full multi-user sharing with
+  named roles is still a later addition), but real visibility into who has
+  actually used the password, which is the security-relevant question in
+  the meantime.
+
+**Not yet implemented**: full multi-user device sharing (inviting a specific
+person by email, assigning them a role, revoking just them rather than
+rotating the shared password), and a persistent (DB-backed, not Redis-only)
+record of unattended-lockout events.
 
 ## Phase 2 status
 
@@ -412,6 +465,17 @@ test:watch` while iterating.
    brief pause). Typing `c` at the agent's console, or clicking **Stop
    Camera** in the browser, should make the "Camera Active" indicator
    disappear on both ends.
+9. Register a *second* account in a different browser (or an incognito
+   window). On the first account's device page, enable unattended access
+   with a password. In the second account, go to Devices → **Connect to a
+   device**, enter the device ID and that password → you should land in the
+   same `/remote/:sessionId` flow as step 7, without owning the device.
+   Trying five wrong passwords in a row should lock out with
+   `UNATTENDED_PASSWORD_INVALID` even on a since-corrected sixth attempt
+   (see `apps/api/tests/sessions.test.ts` for the same behavior under test).
+   Back in the first account, the device's **Access history** card should
+   show the second account's session, and a **Connected via access
+   password** card should list the second account by name.
 
 ### 5. Exercising the signaling socket directly
 
@@ -454,8 +518,8 @@ and the frame parser are all wired correctly independent of the agent.
   [What's implemented in Phase 3](#whats-implemented-in-phase-3).
 - ~~**Phase 4** - Camera/microphone with consent prompts and always-on
   indicators~~ - built; see [What's implemented in Phase 4](#whats-implemented-in-phase-4).
-- **Phase 5** - Deeper unattended-access management, access history, security
-  hardening pass
+- ~~**Phase 5** - Deeper unattended-access management, access history, security
+  hardening pass~~ - built; see [What's implemented in Phase 5](#whats-implemented-in-phase-5).
 - **Phase 6** - TURN in production, reconnection/ICE-restart handling,
   horizontal scaling, monitoring, deployment
 

@@ -90,6 +90,49 @@ function mouseButtonName(button: number): 'left' | 'right' | 'middle' | null {
   return null;
 }
 
+let reportedConnectionTypeFor: string | null = null;
+
+/**
+ * Reports whether the media path ended up direct (peer-to-peer, possibly via
+ * a NAT-traversal-assisting STUN-discovered address) or relayed through
+ * TURN, by inspecting the selected candidate pair. This is the only place
+ * that information exists - the API never sees the media path itself - so
+ * without this call every session's connection-type history would just be
+ * blank. Reported once per session; a later reconnect through a different
+ * path is a nuance the access-history view does not need.
+ */
+async function reportConnectionType(pc: RTCPeerConnection, sessionId: string | undefined): Promise<void> {
+  if (!sessionId || reportedConnectionTypeFor === sessionId) return;
+  reportedConnectionTypeFor = sessionId;
+
+  try {
+    const stats = await pc.getStats();
+    let connectionType: 'direct' | 'relay' | null = null;
+
+    stats.forEach((report) => {
+      if (report.type === 'transport' && report.selectedCandidatePairId) {
+        const pair = stats.get(report.selectedCandidatePairId as string);
+        if (pair) {
+          const local = stats.get(pair.localCandidateId as string);
+          const remote = stats.get(pair.remoteCandidateId as string);
+          connectionType = local?.candidateType === 'relay' || remote?.candidateType === 'relay' ? 'relay' : 'direct';
+        }
+      }
+    });
+
+    if (connectionType) {
+      await api.patch(`/api/v1/sessions/${sessionId}/activity`, { connectionType });
+    }
+  } catch {
+    /* best-effort: connection-type history is a nicety, not a correctness requirement */
+  }
+}
+
+function reportActivity(sessionId: string | undefined, flag: 'usedCamera' | 'usedMicrophone' | 'usedAudio' | 'usedClipboard' | 'usedFiles'): void {
+  if (!sessionId) return;
+  void api.patch(`/api/v1/sessions/${sessionId}/activity`, { [flag]: true }).catch(() => undefined);
+}
+
 export default function RemoteSessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
@@ -165,6 +208,11 @@ export default function RemoteSessionPage() {
       setError(null);
 
       let iceServers: IceServerConfig[] = [];
+      // Read directly rather than through the `hasCapability`/`capabilities`
+      // state below: this whole function runs before React has had a chance
+      // to re-render with that state, so a state-derived closure would still
+      // see last render's (empty, on first connect) value further down.
+      let sessionCapabilities: string[] = [];
       try {
         const res = await api.get<{
           session: { status: string; device: { name: string }; capabilities: string[] };
@@ -173,6 +221,7 @@ export default function RemoteSessionPage() {
         if (cancelled) return;
         setDeviceLabel(res.session.device.name);
         setCapabilities(res.session.capabilities);
+        sessionCapabilities = res.session.capabilities;
         iceServers = res.iceServers;
 
         if (res.session.status === 'ended') return setPhase('ended');
@@ -216,6 +265,7 @@ export default function RemoteSessionPage() {
                 .then(() => setClipboardToast('Copied from remote clipboard.'))
                 .catch(() => setClipboardToast('Remote clipboard changed - click to copy.'));
               clipboardFromRemoteRef.current = message.text;
+              reportActivity(sessionId, 'usedClipboard');
             }
           });
         }
@@ -227,6 +277,8 @@ export default function RemoteSessionPage() {
         if (cancelled) return;
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
           setPhase('active');
+          void reportConnectionType(pc, sessionId);
+          if (sessionCapabilities.includes('audio')) reportActivity(sessionId, 'usedAudio');
         } else if (pc.iceConnectionState === 'disconnected') {
           setPhase('reconnecting');
         } else if (pc.iceConnectionState === 'failed') {
@@ -317,6 +369,7 @@ export default function RemoteSessionPage() {
             const setState = requested === 'camera' ? setCameraState : setMicrophoneState;
             if (message.granted) {
               setState('active');
+              reportActivity(sessionId, requested === 'camera' ? 'usedCamera' : 'usedMicrophone');
             } else {
               setState('denied');
               if (message.osDenied) {
@@ -373,8 +426,11 @@ export default function RemoteSessionPage() {
     const channel = channelForInput(input.type) === INPUT_CHANNEL_MOTION ? motionChannelRef.current : reliableChannelRef.current;
     if (channel && channel.readyState === 'open') {
       channel.send(JSON.stringify(input));
+      if (input.type === 'clipboard:text' && input.direction === 'to-remote') {
+        reportActivity(sessionId, 'usedClipboard');
+      }
     }
-  }, []);
+  }, [sessionId]);
 
   function onMouseMove(e: React.MouseEvent<HTMLVideoElement>) {
     const video = videoRef.current;
@@ -589,6 +645,7 @@ export default function RemoteSessionPage() {
             canDownload={hasCapability('fileDownload')}
             canDelete={hasCapability('fileDelete')}
             onClose={() => setShowFiles(false)}
+            onTransferStarted={() => reportActivity(sessionId, 'usedFiles')}
           />
         )}
 

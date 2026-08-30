@@ -100,22 +100,51 @@ export function useIssueEnrollmentCode(id: string) {
   });
 }
 
-interface DeviceSessionRow {
+export interface DeviceSessionRow {
   id: string;
   sessionId: string;
   status: string;
   startedAt: string;
   endedAt: string | null;
+  durationMs: number | null;
   userEmail: string;
+  userName: string;
+  unattended: boolean;
   connectionType: string | null;
   endReason: string | null;
   capabilities: string[];
+  usedCamera: boolean;
+  usedMicrophone: boolean;
+  usedAudio: boolean;
+  usedClipboard: boolean;
+  usedFiles: boolean;
 }
 
 export function useDeviceSessions(id: string | undefined) {
   return useQuery({
     queryKey: ['devices', id, 'sessions'] as const,
     queryFn: () => api.get<{ sessions: DeviceSessionRow[] }>(`/api/v1/devices/${id}/sessions`),
+    enabled: Boolean(id),
+  });
+}
+
+export interface RecentConnection {
+  id: string;
+  email: string;
+  name: string;
+  sessionCount: number;
+  lastConnectedAt: string | null;
+}
+
+export function useDeviceAccess(id: string | undefined) {
+  return useQuery({
+    queryKey: ['devices', id, 'access'] as const,
+    queryFn: () =>
+      api.get<{
+        authorizedUsers: { id: string; email: string; name: string; role: string; addedAt: string }[];
+        unattendedAccessEnabled: boolean;
+        recentConnections: RecentConnection[];
+      }>(`/api/v1/devices/${id}/access`),
     enabled: Boolean(id),
   });
 }

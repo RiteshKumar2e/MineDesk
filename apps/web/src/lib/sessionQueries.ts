@@ -11,8 +11,18 @@ export interface CreateSessionResult {
   deviceOnline: boolean;
 }
 
+export interface CreateSessionInput {
+  deviceId: string;
+  /** Only required when connecting to a device this account does not own. */
+  unattendedPassword?: string;
+}
+
 export function useCreateSession() {
   return useMutation({
-    mutationFn: (deviceId: string) => api.post<CreateSessionResult>('/api/v1/sessions', { deviceId }),
+    mutationFn: (input: CreateSessionInput | string) =>
+      api.post<CreateSessionResult>(
+        '/api/v1/sessions',
+        typeof input === 'string' ? { deviceId: input } : input,
+      ),
   });
 }

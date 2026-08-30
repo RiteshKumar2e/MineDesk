@@ -13,6 +13,10 @@ interface FileManagerPanelProps {
   canDownload: boolean;
   canDelete: boolean;
   onClose: () => void;
+  /** Called once a transfer actually starts, so the session's access history
+   * can record that file transfer was used - the API has no other way to
+   * see this, since transfers happen entirely over the peer-to-peer channel. */
+  onTransferStarted?: () => void;
 }
 
 type TransferDirection = 'upload' | 'download';
@@ -33,7 +37,7 @@ interface TransferState {
  * `md-files` DataChannel. One transfer at a time, matching the agent - see
  * `packages/protocol/src/filetransfer.ts` for why that constraint exists.
  */
-export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, onClose }: FileManagerPanelProps) {
+export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, onClose, onTransferStarted }: FileManagerPanelProps) {
   const [path, setPath] = useState('');
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -242,6 +246,7 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
     if (transfer && transfer.status === 'active') return;
     const entryPath = path ? `${path}/${entry.name}` : entry.name;
     send({ type: 'download:start', transferId: crypto.randomUUID(), path: entryPath });
+    onTransferStarted?.();
   }
 
   function handleUploadClick() {
@@ -257,6 +262,7 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
     uploadFileRef.current = file;
     setTransfer({ id: transferId, direction: 'upload', fileName: file.name, size: file.size, transferredBytes: 0, startedAt: Date.now(), status: 'active' });
     send({ type: 'upload:start', transferId, path, fileName: file.name, size: file.size });
+    onTransferStarted?.();
   }
 
   function handleCancelTransfer() {

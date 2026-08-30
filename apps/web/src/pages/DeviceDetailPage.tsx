@@ -1,4 +1,4 @@
-import { CAPABILITY_DESCRIPTIONS, CAPABILITY_GROUPS, CAPABILITY_LABELS } from '@minedesk/shared';
+import { CAPABILITY_DESCRIPTIONS, CAPABILITY_GROUPS, CAPABILITY_LABELS, formatDuration } from '@minedesk/shared';
 import type { Capability } from '@minedesk/types';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -6,6 +6,7 @@ import { StatusDot } from '../components/StatusDot';
 import { ApiError } from '../lib/apiClient';
 import {
   useDevice,
+  useDeviceAccess,
   useDeviceSessions,
   useDeleteDevice,
   useIssueEnrollmentCode,
@@ -16,11 +17,20 @@ import {
 } from '../lib/deviceQueries';
 import { useCreateSession } from '../lib/sessionQueries';
 
+const ACTIVITY_ICONS: { flag: 'usedCamera' | 'usedMicrophone' | 'usedAudio' | 'usedClipboard' | 'usedFiles'; icon: string; title: string }[] = [
+  { flag: 'usedCamera', icon: '\u{1F4F7}', title: 'Camera was used' },
+  { flag: 'usedMicrophone', icon: '\u{1F3A4}', title: 'Microphone was used' },
+  { flag: 'usedAudio', icon: '\u{1F50A}', title: 'Remote audio was used' },
+  { flag: 'usedClipboard', icon: '\u{1F4CB}', title: 'Clipboard was used' },
+  { flag: 'usedFiles', icon: '\u{1F4C1}', title: 'Files were transferred' },
+];
+
 export default function DeviceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data, isLoading, error } = useDevice(id);
   const { data: sessionsData } = useDeviceSessions(id);
+  const { data: accessData } = useDeviceAccess(id);
 
   const renameDevice = useRenameDevice(id ?? '');
   const deleteDevice = useDeleteDevice();
@@ -265,27 +275,67 @@ export default function DeviceDetailPage() {
           </section>
 
           <section className="card p-5">
-            <h2 className="mb-3 font-medium">Recent sessions</h2>
+            <h2 className="mb-3 font-medium">Access history</h2>
             {!sessionsData || sessionsData.sessions.length === 0 ? (
               <p className="text-sm text-slate-500 dark:text-slate-400">No sessions yet.</p>
             ) : (
               <ul className="divide-y divide-slate-100 dark:divide-slate-800">
                 {sessionsData.sessions.map((session) => (
-                  <li key={session.id} className="flex items-center justify-between py-2 text-sm">
-                    <div>
-                      <div className="font-medium">{session.sessionId}</div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400">
-                        {session.userEmail} &middot; {new Date(session.startedAt).toLocaleString()}
+                  <li key={session.id} className="py-2.5 text-sm">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="font-medium">
+                          {session.userName} <span className="font-normal text-slate-400">({session.userEmail})</span>
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                          {new Date(session.startedAt).toLocaleString()}
+                          {session.durationMs !== null && ` · ${formatDuration(session.durationMs)}`}
+                          {session.unattended && ' · unattended'}
+                          {session.connectionType && ` · ${session.connectionType}`}
+                        </div>
                       </div>
+                      <span className="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {session.status}
+                      </span>
                     </div>
-                    <span className="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                      {session.status}
-                    </span>
+                    {ACTIVITY_ICONS.some((a) => session[a.flag]) && (
+                      <div className="mt-1 flex gap-1.5 text-sm" aria-label="Capabilities used during this session">
+                        {ACTIVITY_ICONS.filter((a) => session[a.flag]).map((a) => (
+                          <span key={a.flag} title={a.title}>
+                            {a.icon}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
             )}
           </section>
+
+          {accessData && accessData.recentConnections.length > 0 && (
+            <section className="card p-5">
+              <h2 className="mb-1 font-medium">Connected via access password</h2>
+              <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+                These accounts are not owners of this device - they connected using the unattended access
+                password. Change the password to revoke their access.
+              </p>
+              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                {accessData.recentConnections.map((conn) => (
+                  <li key={conn.id} className="flex items-center justify-between py-2 text-sm">
+                    <div>
+                      <div className="font-medium">{conn.name}</div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400">{conn.email}</div>
+                    </div>
+                    <div className="text-right text-xs text-slate-500 dark:text-slate-400">
+                      <div>{conn.sessionCount} session{conn.sessionCount === 1 ? '' : 's'}</div>
+                      <div>{conn.lastConnectedAt ? new Date(conn.lastConnectedAt).toLocaleDateString() : ''}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </div>
 
         <div className="space-y-6">

@@ -187,4 +187,147 @@ describe('session creation', () => {
       await markDeviceOffline(device.deviceId);
     }
   });
+
+  describe('unattended access password', () => {
+    it('refuses a non-owner with no unattended access configured', async () => {
+      const owner = await registerAndLogin(app);
+      const other = await registerAndLogin(app);
+      const device = await createDevice(app, owner.accessToken);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions',
+        headers: { authorization: `Bearer ${other.accessToken}` },
+        payload: { deviceId: device.deviceId },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe('UNATTENDED_ACCESS_DISABLED');
+    });
+
+    it('refuses a non-owner with the wrong password, and locks out after repeated failures', async () => {
+      const owner = await registerAndLogin(app);
+      const other = await registerAndLogin(app);
+      const device = await createDevice(app, owner.accessToken);
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/devices/${device.id}/unattended`,
+        headers: { authorization: `Bearer ${owner.accessToken}` },
+        payload: { enabled: true, password: 'the-correct-password' },
+      });
+
+      let last;
+      for (let i = 0; i < 5; i++) {
+        last = await app.inject({
+          method: 'POST',
+          url: '/api/v1/sessions',
+          headers: { authorization: `Bearer ${other.accessToken}` },
+          payload: { deviceId: device.deviceId, unattendedPassword: 'wrong-password' },
+        });
+        expect(last.statusCode).toBe(401);
+      }
+
+      // The 6th attempt is locked out even if it now supplies the right password.
+      const afterLockout = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions',
+        headers: { authorization: `Bearer ${other.accessToken}` },
+        payload: { deviceId: device.deviceId, unattendedPassword: 'the-correct-password' },
+      });
+      expect(afterLockout.statusCode).toBe(401);
+      expect(afterLockout.json().error.code).toBe('UNATTENDED_PASSWORD_INVALID');
+    });
+
+    it('lets a non-owner connect with the correct password, and the owner needs no password at all', async () => {
+      const owner = await registerAndLogin(app);
+      const other = await registerAndLogin(app);
+      const device = await createDevice(app, owner.accessToken);
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/devices/${device.id}/unattended`,
+        headers: { authorization: `Bearer ${owner.accessToken}` },
+        payload: { enabled: true, password: 'the-correct-password' },
+      });
+
+      await markDeviceOnline({
+        deviceId: device.deviceId,
+        connectionId: 'test-connection',
+        nodeId: hub.nodeId,
+        agentVersion: null,
+        ip: '127.0.0.1',
+        since: Date.now(),
+      });
+
+      try {
+        const nonOwner = await app.inject({
+          method: 'POST',
+          url: '/api/v1/sessions',
+          headers: { authorization: `Bearer ${other.accessToken}` },
+          payload: { deviceId: device.deviceId, unattendedPassword: 'the-correct-password' },
+        });
+        expect(nonOwner.statusCode).toBe(201);
+
+        // End that session before the owner tries, since only one may be in flight.
+        const sessionId = nonOwner.json().sessionId as string;
+        await app.inject({
+          method: 'POST',
+          url: `/api/v1/sessions/${sessionId}/terminate`,
+          headers: { authorization: `Bearer ${other.accessToken}` },
+        });
+
+        const ownerRes = await app.inject({
+          method: 'POST',
+          url: '/api/v1/sessions',
+          headers: { authorization: `Bearer ${owner.accessToken}` },
+          payload: { deviceId: device.deviceId },
+        });
+        expect(ownerRes.statusCode).toBe(201);
+      } finally {
+        await markDeviceOffline(device.deviceId);
+      }
+    });
+
+    it('lists a non-owner who connected in the device access history', async () => {
+      const owner = await registerAndLogin(app);
+      const other = await registerAndLogin(app);
+      const device = await createDevice(app, owner.accessToken);
+
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/devices/${device.id}/unattended`,
+        headers: { authorization: `Bearer ${owner.accessToken}` },
+        payload: { enabled: true, password: 'the-correct-password' },
+      });
+
+      await markDeviceOnline({
+        deviceId: device.deviceId,
+        connectionId: 'test-connection',
+        nodeId: hub.nodeId,
+        agentVersion: null,
+        ip: '127.0.0.1',
+        since: Date.now(),
+      });
+
+      try {
+        await app.inject({
+          method: 'POST',
+          url: '/api/v1/sessions',
+          headers: { authorization: `Bearer ${other.accessToken}` },
+          payload: { deviceId: device.deviceId, unattendedPassword: 'the-correct-password' },
+        });
+
+        const access = await app.inject({
+          method: 'GET',
+          url: `/api/v1/devices/${device.id}/access`,
+          headers: { authorization: `Bearer ${owner.accessToken}` },
+        });
+        expect(access.statusCode).toBe(200);
+        expect(access.json().recentConnections).toHaveLength(1);
+        expect(access.json().recentConnections[0].email).toBe(other.email);
+      } finally {
+        await markDeviceOffline(device.deviceId);
+      }
+    });
+  });
 });
