@@ -32,7 +32,7 @@ const schema = z.object({
   API_PUBLIC_URL: z.string().url().default('http://localhost:4000'),
   WEB_ORIGIN: z.string().default('http://localhost:5173'),
 
-  // A local file (file:./prisma/dev.db) needs nothing else. A real Turso
+  // A local file (file:./db/dev.db) needs nothing else. A real Turso
   // database (libsql://<name>.turso.io) additionally needs DATABASE_AUTH_TOKEN.
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   DATABASE_AUTH_TOKEN: z.string().optional(),

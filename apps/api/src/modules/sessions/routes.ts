@@ -5,15 +5,32 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { verifyPassword } from '../../lib/crypto.js';
+import type { InValue } from '@libsql/client';
+import { execute, newId, nowIso, queryAll, queryOne } from '../../lib/db.js';
 import { AppError } from '../../lib/errors.js';
 import { buildIceServers } from '../../lib/ice.js';
 import { asStringArray, toJsonText } from '../../lib/json.js';
+import { mapDevice, mapDevicePermission, mapRemoteSession, type DevicePermissionRow, type DeviceRow } from '../../lib/models.js';
 import { getPresence, isDeviceOnline } from '../../lib/presence.js';
-import { prisma } from '../../lib/prisma.js';
 import { clearUnattendedFailures, isUnattendedAccessLocked, recordUnattendedFailure } from '../../lib/unattendedLockout.js';
 import { STRICT_LIMITS } from '../../plugins/security.js';
 import { permissionsOf } from '../devices/service.js';
 import { hub } from '../signaling/hub.js';
+
+/** Deliberately not scoped to userId - see the comment at its one call site below. */
+async function loadDeviceByDeviceId(
+  deviceId: string,
+): Promise<(DeviceRow & { permissions: DevicePermissionRow | null }) | null> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM devices WHERE deviceId = ?', [deviceId]);
+  if (!row) return null;
+  const device = mapDevice(row);
+  const permRow = await queryOne<Record<string, unknown>>('SELECT * FROM device_permissions WHERE deviceId = ?', [
+    device.id,
+  ]);
+  return { ...device, permissions: permRow ? mapDevicePermission(permRow) : null };
+}
+
+const ACTIVE_STATUSES = ['pending', 'active', 'reconnecting'];
 
 const listQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -77,10 +94,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     // caller does not own can still be reachable, via the unattended
     // password path below. Ownership is checked explicitly next, not baked
     // into the query, precisely so that path has something to fall through to.
-    const device = await prisma.device.findFirst({
-      where: { deviceId: input.deviceId },
-      include: { permissions: true },
-    });
+    const device = await loadDeviceByDeviceId(input.deviceId);
     if (!device || device.revokedAt || !device.agentSecretHash) throw new AppError(ErrorCode.DEVICE_NOT_FOUND);
 
     const isOwner = device.userId === request.user!.id;
@@ -144,10 +158,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     if (!(await isDeviceOnline(device.deviceId))) throw new AppError(ErrorCode.DEVICE_OFFLINE);
 
-    const busy = await prisma.remoteSession.findFirst({
-      where: { deviceId: device.id, status: { in: ['pending', 'active', 'reconnecting'] } },
-      select: { id: true },
-    });
+    const busy = await queryOne<{ id: string }>(
+      `SELECT id FROM remote_sessions WHERE deviceId = ? AND status IN (${ACTIVE_STATUSES.map(() => '?').join(',')}) LIMIT 1`,
+      [device.id, ...ACTIVE_STATUSES],
+    );
     if (busy) throw new AppError(ErrorCode.DEVICE_BUSY);
 
     const permissions = permissionsOf(device.permissions);
@@ -159,23 +173,22 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const sessionId = generateSessionId();
+    const sessionRowId = newId();
+    // This flag is what tells the agent to accept without prompting, so it
+    // must describe how *this* session was authorized, not what the device is
+    // configured for. An owner reaching their own machine that they put in
+    // unattended mode skips the prompt; anyone else skips it only by having
+    // actually presented the password just above.
+    const unattended = isOwner ? device.unattendedAccessEnabled : viaUnattendedPassword;
 
-    const session = await prisma.remoteSession.create({
-      data: {
-        sessionId,
-        userId: request.user!.id,
-        deviceId: device.id,
-        status: 'pending',
-        // This flag is what tells the agent to accept without prompting, so
-        // it must describe how *this* session was authorized, not what the
-        // device is configured for. An owner reaching their own machine that
-        // they put in unattended mode skips the prompt; anyone else skips it
-        // only by having actually presented the password just above.
-        unattended: isOwner ? device.unattendedAccessEnabled : viaUnattendedPassword,
-        grantedCapabilities: toJsonText(capabilities),
-        controllerIp: ipAddress,
-      },
-    });
+    await execute(
+      `INSERT INTO remote_sessions (id, sessionId, userId, deviceId, status, grantedCapabilities, unattended, controllerIp, requestedAt)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+      [sessionRowId, sessionId, request.user!.id, device.id, toJsonText(capabilities), unattended ? 1 : 0, ipAddress, nowIso()],
+    );
+    const session = mapRemoteSession(
+      (await queryOne<Record<string, unknown>>('SELECT * FROM remote_sessions WHERE id = ?', [sessionRowId]))!,
+    );
 
     await recordAudit({
       userId: request.user!.id,
@@ -235,55 +248,70 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/', async (request, reply) => {
     const query = listQuery.parse(request.query);
-    const sessions = await prisma.remoteSession.findMany({
-      where: { userId: request.user!.id, ...(query.status ? { status: query.status } : {}) },
-      orderBy: { requestedAt: 'desc' },
-      take: query.limit,
-      include: { device: { select: { name: true, deviceId: true, os: true } } },
-    });
+    const args: InValue[] = [request.user!.id];
+    let statusClause = '';
+    if (query.status) {
+      statusClause = 'AND rs.status = ?';
+      args.push(query.status);
+    }
+    args.push(query.limit);
+
+    const rows = await queryAll<Record<string, unknown>>(
+      `SELECT rs.*, d.name as device_name, d.deviceId as device_deviceId, d.os as device_os
+       FROM remote_sessions rs JOIN devices d ON d.id = rs.deviceId
+       WHERE rs.userId = ? ${statusClause}
+       ORDER BY rs.requestedAt DESC LIMIT ?`,
+      args,
+    );
 
     return reply.send({
-      sessions: sessions.map((session) => ({
-        id: session.id,
-        sessionId: session.sessionId,
-        status: session.status,
-        device: session.device,
-        unattended: session.unattended,
-        capabilities: asStringArray(session.grantedCapabilities),
-        connectionType: session.connectionType,
-        requestedAt: session.requestedAt.toISOString(),
-        startedAt: session.startedAt?.toISOString() ?? null,
-        endedAt: session.endedAt?.toISOString() ?? null,
-        durationMs:
-          session.startedAt && session.endedAt
-            ? session.endedAt.getTime() - session.startedAt.getTime()
-            : session.startedAt
-              ? Date.now() - session.startedAt.getTime()
-              : null,
-        usedCamera: session.usedCamera,
-        usedMicrophone: session.usedMicrophone,
-        usedAudio: session.usedAudio,
-        usedClipboard: session.usedClipboard,
-        usedFiles: session.usedFiles,
-        endReason: session.endReason,
-      })),
+      sessions: rows.map((row) => {
+        const session = mapRemoteSession(row);
+        return {
+          id: session.id,
+          sessionId: session.sessionId,
+          status: session.status,
+          device: { name: row.device_name, deviceId: row.device_deviceId, os: row.device_os },
+          unattended: session.unattended,
+          capabilities: asStringArray(session.grantedCapabilities),
+          connectionType: session.connectionType,
+          requestedAt: session.requestedAt.toISOString(),
+          startedAt: session.startedAt?.toISOString() ?? null,
+          endedAt: session.endedAt?.toISOString() ?? null,
+          durationMs:
+            session.startedAt && session.endedAt
+              ? session.endedAt.getTime() - session.startedAt.getTime()
+              : session.startedAt
+                ? Date.now() - session.startedAt.getTime()
+                : null,
+          usedCamera: session.usedCamera,
+          usedMicrophone: session.usedMicrophone,
+          usedAudio: session.usedAudio,
+          usedClipboard: session.usedClipboard,
+          usedFiles: session.usedFiles,
+          endReason: session.endReason,
+        };
+      }),
     });
   });
 
   app.get('/:sessionId', async (request, reply) => {
     const { sessionId } = z.object({ sessionId: z.string().max(32) }).parse(request.params);
-    const session = await prisma.remoteSession.findFirst({
-      where: { sessionId, userId: request.user!.id },
-      include: { device: { select: { name: true, deviceId: true, os: true } } },
-    });
-    if (!session) throw new AppError(ErrorCode.SESSION_NOT_FOUND);
+    const row = await queryOne<Record<string, unknown>>(
+      `SELECT rs.*, d.name as device_name, d.deviceId as device_deviceId, d.os as device_os
+       FROM remote_sessions rs JOIN devices d ON d.id = rs.deviceId
+       WHERE rs.sessionId = ? AND rs.userId = ?`,
+      [sessionId, request.user!.id],
+    );
+    if (!row) throw new AppError(ErrorCode.SESSION_NOT_FOUND);
+    const session = mapRemoteSession(row);
 
     return reply.send({
       session: {
         id: session.id,
         sessionId: session.sessionId,
         status: session.status,
-        device: session.device,
+        device: { name: row.device_name, deviceId: row.device_deviceId, os: row.device_os },
         capabilities: asStringArray(session.grantedCapabilities),
         requestedAt: session.requestedAt.toISOString(),
         startedAt: session.startedAt?.toISOString() ?? null,
@@ -297,16 +325,18 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   /** End a session from the dashboard. The agent can always end it locally too. */
   app.post('/:sessionId/terminate', async (request, reply) => {
     const { sessionId } = z.object({ sessionId: z.string().max(32) }).parse(request.params);
-    const session = await prisma.remoteSession.findFirst({
-      where: { sessionId, userId: request.user!.id },
-    });
-    if (!session) throw new AppError(ErrorCode.SESSION_NOT_FOUND);
+    const row = await queryOne<Record<string, unknown>>(
+      'SELECT * FROM remote_sessions WHERE sessionId = ? AND userId = ?',
+      [sessionId, request.user!.id],
+    );
+    if (!row) throw new AppError(ErrorCode.SESSION_NOT_FOUND);
+    const session = mapRemoteSession(row);
     if (session.status === 'ended') return reply.send({ ok: true, alreadyEnded: true });
 
-    await prisma.remoteSession.update({
-      where: { id: session.id },
-      data: { status: 'ended', endedAt: new Date(), endReason: 'terminated_by_user' },
-    });
+    await execute(`UPDATE remote_sessions SET status = 'ended', endedAt = ?, endReason = 'terminated_by_user' WHERE id = ?`, [
+      nowIso(),
+      session.id,
+    ]);
 
     await recordAudit({
       userId: request.user!.id,
@@ -337,23 +367,28 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     const { sessionId } = z.object({ sessionId: z.string().max(32) }).parse(request.params);
     const input = activitySchema.parse(request.body);
 
-    const session = await prisma.remoteSession.findFirst({
-      where: { sessionId, userId: request.user!.id },
-      select: { id: true },
-    });
+    const session = await queryOne<{ id: string }>('SELECT id FROM remote_sessions WHERE sessionId = ? AND userId = ?', [
+      sessionId,
+      request.user!.id,
+    ]);
     if (!session) throw new AppError(ErrorCode.SESSION_NOT_FOUND);
 
-    await prisma.remoteSession.update({
-      where: { id: session.id },
-      data: {
-        ...(input.connectionType ? { connectionType: input.connectionType } : {}),
-        ...(input.usedCamera ? { usedCamera: true } : {}),
-        ...(input.usedMicrophone ? { usedMicrophone: true } : {}),
-        ...(input.usedAudio ? { usedAudio: true } : {}),
-        ...(input.usedClipboard ? { usedClipboard: true } : {}),
-        ...(input.usedFiles ? { usedFiles: true } : {}),
-      },
-    });
+    const setClauses: string[] = [];
+    const args: InValue[] = [];
+    if (input.connectionType) {
+      setClauses.push('connectionType = ?');
+      args.push(input.connectionType);
+    }
+    if (input.usedCamera) setClauses.push('usedCamera = 1');
+    if (input.usedMicrophone) setClauses.push('usedMicrophone = 1');
+    if (input.usedAudio) setClauses.push('usedAudio = 1');
+    if (input.usedClipboard) setClauses.push('usedClipboard = 1');
+    if (input.usedFiles) setClauses.push('usedFiles = 1');
+
+    if (setClauses.length > 0) {
+      args.push(session.id);
+      await execute(`UPDATE remote_sessions SET ${setClauses.join(', ')} WHERE id = ?`, args);
+    }
 
     return reply.send({ ok: true });
   });

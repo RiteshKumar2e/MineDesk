@@ -1,13 +1,13 @@
 import { AuditAction, ErrorCode } from '@minedesk/protocol';
 import type { PublicAuthSession, PublicUser } from '@minedesk/types';
-import type { AuthSession, User } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { env } from '../../config/env.js';
 import { recordAudit } from '../../lib/audit.js';
 import { generateOpaqueToken, hashPassword, hashToken, verifyPassword } from '../../lib/crypto.js';
+import { execute, newId, nowIso, queryAll, queryOne } from '../../lib/db.js';
 import { AppError } from '../../lib/errors.js';
 import { mailer, passwordResetEmail, verificationEmail } from '../../lib/mailer.js';
-import { prisma } from '../../lib/prisma.js';
+import { mapAuthSession, mapUser, type AuthSessionRow, type UserRow } from '../../lib/models.js';
 import { redis } from '../../lib/redis.js';
 import { revokeJti, signAccessToken } from '../../lib/tokens.js';
 
@@ -16,7 +16,7 @@ export interface RequestMeta {
   userAgent: string | null;
 }
 
-export function toPublicUser(user: User): PublicUser {
+export function toPublicUser(user: UserRow): PublicUser {
   return {
     id: user.id,
     email: user.email,
@@ -27,7 +27,7 @@ export function toPublicUser(user: User): PublicUser {
   };
 }
 
-export function toPublicAuthSession(session: AuthSession, currentId: string): PublicAuthSession {
+export function toPublicAuthSession(session: AuthSessionRow, currentId: string): PublicAuthSession {
   return {
     id: session.id,
     current: session.id === currentId,
@@ -46,17 +46,20 @@ export function toPublicAuthSession(session: AuthSession, currentId: string): Pu
 export async function registerUser(
   input: { email: string; name: string; password: string },
   meta: RequestMeta,
-): Promise<User> {
-  const existing = await prisma.user.findUnique({ where: { email: input.email }, select: { id: true } });
+): Promise<UserRow> {
+  const existing = await queryOne('SELECT id FROM users WHERE email = ?', [input.email]);
   if (existing) throw new AppError(ErrorCode.EMAIL_IN_USE);
 
-  const user = await prisma.user.create({
-    data: {
-      email: input.email,
-      name: input.name,
-      passwordHash: await hashPassword(input.password),
-    },
-  });
+  const id = newId();
+  const timestamp = nowIso();
+  await execute(
+    `INSERT INTO users (id, email, passwordHash, name, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, input.email, await hashPassword(input.password), input.name, timestamp, timestamp],
+  );
+  const user = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [id]).then(
+    (row) => mapUser(row!),
+  );
 
   await sendVerificationEmail(user);
   await recordAudit({
@@ -88,15 +91,18 @@ async function createDisposableUser(
   displayName: string,
   meta: RequestMeta,
   action: (typeof AuditAction)[keyof typeof AuditAction],
-): Promise<User> {
+): Promise<UserRow> {
   const name = displayName.trim().slice(0, 60) || 'Guest';
-  const user = await prisma.user.create({
-    data: {
-      email: `guest-${randomUUID()}@guest.minedesk.invalid`,
-      name,
-      passwordHash: await hashPassword(generateOpaqueToken(32)),
-    },
-  });
+  const id = newId();
+  const timestamp = nowIso();
+  await execute(
+    `INSERT INTO users (id, email, passwordHash, name, createdAt, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, `guest-${randomUUID()}@guest.minedesk.invalid`, await hashPassword(generateOpaqueToken(32)), name, timestamp, timestamp],
+  );
+  const user = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [id]).then(
+    (row) => mapUser(row!),
+  );
   await recordAudit({
     userId: user.id,
     action,
@@ -107,7 +113,7 @@ async function createDisposableUser(
   return user;
 }
 
-export async function createGuestUser(displayName: string, meta: RequestMeta): Promise<User> {
+export async function createGuestUser(displayName: string, meta: RequestMeta): Promise<UserRow> {
   return createDisposableUser(displayName, meta, AuditAction.USER_GUEST_CREATED);
 }
 
@@ -119,7 +125,7 @@ export async function createGuestUser(displayName: string, meta: RequestMeta): P
  * permission/ownership/audit rule keeps applying to it unchanged rather than
  * carving out a null-owner special case.
  */
-export async function createUnattendedDeviceOwner(hostname: string, meta: RequestMeta): Promise<User> {
+export async function createUnattendedDeviceOwner(hostname: string, meta: RequestMeta): Promise<UserRow> {
   return createDisposableUser(hostname, meta, AuditAction.USER_DEVICE_OWNER_CREATED);
 }
 
@@ -142,13 +148,14 @@ export async function authenticateCredentials(
   email: string,
   password: string,
   meta: RequestMeta,
-): Promise<User> {
-  const user = await prisma.user.findUnique({ where: { email } });
+): Promise<UserRow> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE email = ?', [email]);
 
-  if (!user) {
+  if (!row) {
     await verifyPassword(DUMMY_HASH, password);
     throw new AppError(ErrorCode.INVALID_CREDENTIALS);
   }
+  const user = mapUser(row);
 
   if (user.lockedUntil && user.lockedUntil > new Date()) {
     throw new AppError(ErrorCode.ACCOUNT_LOCKED, {
@@ -161,13 +168,11 @@ export async function authenticateCredentials(
   if (!valid) {
     const attempts = user.failedLoginAttempts + 1;
     const shouldLock = attempts >= env.LOGIN_MAX_ATTEMPTS;
-    await prisma.user.update({
-      where: { id: user.id },
-      data: {
-        failedLoginAttempts: shouldLock ? 0 : attempts,
-        lockedUntil: shouldLock ? new Date(Date.now() + env.LOGIN_LOCKOUT_MINUTES * 60_000) : null,
-      },
-    });
+    await execute('UPDATE users SET failedLoginAttempts = ?, lockedUntil = ? WHERE id = ?', [
+      shouldLock ? 0 : attempts,
+      shouldLock ? new Date(Date.now() + env.LOGIN_LOCKOUT_MINUTES * 60_000).toISOString() : null,
+      user.id,
+    ]);
     await recordAudit({
       userId: user.id,
       action: AuditAction.USER_LOGIN_FAILED,
@@ -179,10 +184,7 @@ export async function authenticateCredentials(
   }
 
   if (user.failedLoginAttempts > 0 || user.lockedUntil) {
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { failedLoginAttempts: 0, lockedUntil: null },
-    });
+    await execute('UPDATE users SET failedLoginAttempts = 0, lockedUntil = NULL WHERE id = ?', [user.id]);
   }
 
   return user;
@@ -221,27 +223,34 @@ export interface IssuedSession {
   expiresIn: number;
 }
 
-export async function issueSession(user: User, meta: RequestMeta): Promise<IssuedSession> {
+export async function issueSession(user: UserRow, meta: RequestMeta): Promise<IssuedSession> {
   const refreshToken = generateOpaqueToken(48);
-  const authSession = await prisma.authSession.create({
-    data: {
-      userId: user.id,
-      tokenHash: hashToken(refreshToken),
-      ipAddress: meta.ip,
-      userAgent: meta.userAgent?.slice(0, 512) ?? null,
-      expiresAt: new Date(Date.now() + env.refreshTokenTtlSeconds * 1000),
-    },
-  });
+  const id = newId();
+  const timestamp = nowIso();
+  await execute(
+    `INSERT INTO auth_sessions (id, userId, tokenHash, ipAddress, userAgent, createdAt, lastUsedAt, expiresAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      user.id,
+      hashToken(refreshToken),
+      meta.ip,
+      meta.userAgent?.slice(0, 512) ?? null,
+      timestamp,
+      timestamp,
+      new Date(Date.now() + env.refreshTokenTtlSeconds * 1000).toISOString(),
+    ],
+  );
 
   const access = await signAccessToken({
     userId: user.id,
-    authSessionId: authSession.id,
+    authSessionId: id,
     email: user.email,
   });
 
   return {
     refreshToken,
-    authSessionId: authSession.id,
+    authSessionId: id,
     accessToken: access.token,
     expiresIn: access.expiresIn,
   };
@@ -259,25 +268,26 @@ export async function issueSession(user: User, meta: RequestMeta): Promise<Issue
 export async function rotateRefreshToken(
   rawToken: string,
   meta: RequestMeta,
-): Promise<IssuedSession & { user: User }> {
+): Promise<IssuedSession & { user: UserRow }> {
   const presentedHash = hashToken(rawToken);
 
-  const session = await prisma.authSession.findUnique({
-    where: { tokenHash: presentedHash },
-    include: { user: true },
-  });
+  const sessionRow = await queryOne<Record<string, unknown>>('SELECT * FROM auth_sessions WHERE tokenHash = ?', [
+    presentedHash,
+  ]);
 
-  if (!session) {
+  if (!sessionRow) {
     // Was this a token we already rotated away? That is a replay.
-    const replayed = await prisma.authSession.findFirst({
-      where: { previousTokenHash: presentedHash },
-      include: { user: true },
-    });
-    if (replayed) {
-      await prisma.authSession.update({
-        where: { id: replayed.id },
-        data: { revokedAt: new Date(), revokedReason: 'refresh_token_reuse' },
-      });
+    const replayedRow = await queryOne<Record<string, unknown>>(
+      'SELECT * FROM auth_sessions WHERE previousTokenHash = ? LIMIT 1',
+      [presentedHash],
+    );
+    if (replayedRow) {
+      const replayed = mapAuthSession(replayedRow);
+      await execute('UPDATE auth_sessions SET revokedAt = ?, revokedReason = ? WHERE id = ?', [
+        nowIso(),
+        'refresh_token_reuse',
+        replayed.id,
+      ]);
       await recordAudit({
         userId: replayed.userId,
         action: AuditAction.AUTH_TOKEN_REUSE_DETECTED,
@@ -290,30 +300,38 @@ export async function rotateRefreshToken(
     throw new AppError(ErrorCode.TOKEN_INVALID);
   }
 
+  const session = mapAuthSession(sessionRow);
   if (session.revokedAt) throw new AppError(ErrorCode.TOKEN_INVALID);
   if (session.expiresAt < new Date()) throw new AppError(ErrorCode.TOKEN_EXPIRED);
 
+  const userRow = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [session.userId]);
+  if (!userRow) throw new AppError(ErrorCode.TOKEN_INVALID);
+  const user = mapUser(userRow);
+
   const nextToken = generateOpaqueToken(48);
-  await prisma.authSession.update({
-    where: { id: session.id },
-    data: {
-      tokenHash: hashToken(nextToken),
-      previousTokenHash: presentedHash,
-      replacedAt: new Date(),
-      rotationCounter: { increment: 1 },
-      lastUsedAt: new Date(),
-      ipAddress: meta.ip,
+  await execute(
+    `UPDATE auth_sessions
+     SET tokenHash = ?, previousTokenHash = ?, replacedAt = ?, rotationCounter = rotationCounter + 1,
+         lastUsedAt = ?, ipAddress = ?, expiresAt = ?
+     WHERE id = ?`,
+    [
+      hashToken(nextToken),
+      presentedHash,
+      nowIso(),
+      nowIso(),
+      meta.ip,
       // Sliding expiry: an actively used session keeps working. It is still
       // bounded - it expires REFRESH_TOKEN_TTL_DAYS after its last use, and any
       // of logout, revoke, password change or admin action kills it instantly.
-      expiresAt: new Date(Date.now() + env.refreshTokenTtlSeconds * 1000),
-    },
-  });
+      new Date(Date.now() + env.refreshTokenTtlSeconds * 1000).toISOString(),
+      session.id,
+    ],
+  );
 
   const access = await signAccessToken({
     userId: session.userId,
     authSessionId: session.id,
-    email: session.user.email,
+    email: user.email,
   });
 
   return {
@@ -321,7 +339,7 @@ export async function rotateRefreshToken(
     authSessionId: session.id,
     accessToken: access.token,
     expiresIn: access.expiresIn,
-    user: session.user,
+    user,
   };
 }
 
@@ -333,11 +351,11 @@ export async function revokeAuthSession(params: {
   accessTokenJti?: string;
   accessTokenExp?: number;
 }): Promise<void> {
-  const result = await prisma.authSession.updateMany({
-    where: { id: params.authSessionId, userId: params.userId, revokedAt: null },
-    data: { revokedAt: new Date(), revokedReason: params.reason },
-  });
-  if (result.count === 0) return;
+  const changed = await execute(
+    'UPDATE auth_sessions SET revokedAt = ?, revokedReason = ? WHERE id = ? AND userId = ? AND revokedAt IS NULL',
+    [nowIso(), params.reason, params.authSessionId, params.userId],
+  );
+  if (changed === 0) return;
 
   // The access token stays cryptographically valid until it expires, so it is
   // denylisted for exactly its remaining lifetime.
@@ -356,18 +374,20 @@ export async function revokeAuthSession(params: {
 }
 
 export async function revokeAllSessions(userId: string, reason: string, exceptId?: string): Promise<number> {
-  const { count } = await prisma.authSession.updateMany({
-    where: { userId, revokedAt: null, ...(exceptId ? { id: { not: exceptId } } : {}) },
-    data: { revokedAt: new Date(), revokedReason: reason },
-  });
-  return count;
+  return execute(
+    `UPDATE auth_sessions SET revokedAt = ?, revokedReason = ?
+     WHERE userId = ? AND revokedAt IS NULL ${exceptId ? 'AND id != ?' : ''}`,
+    exceptId ? [nowIso(), reason, userId, exceptId] : [nowIso(), reason, userId],
+  );
 }
 
-export async function listAuthSessions(userId: string): Promise<AuthSession[]> {
-  return prisma.authSession.findMany({
-    where: { userId, revokedAt: null, expiresAt: { gt: new Date() } },
-    orderBy: { lastUsedAt: 'desc' },
-  });
+export async function listAuthSessions(userId: string): Promise<AuthSessionRow[]> {
+  const rows = await queryAll<Record<string, unknown>>(
+    `SELECT * FROM auth_sessions WHERE userId = ? AND revokedAt IS NULL AND expiresAt > ?
+     ORDER BY lastUsedAt DESC`,
+    [userId, nowIso()],
+  );
+  return rows.map(mapAuthSession);
 }
 
 // --------------------------------------------------------------------------
@@ -385,35 +405,36 @@ const TOKEN_TTL: Record<VerificationTokenType, number> = {
 
 async function createVerificationToken(userId: string, type: VerificationTokenType): Promise<string> {
   // Only one live token per purpose: issuing a new link invalidates the old one.
-  await prisma.verificationToken.updateMany({
-    where: { userId, type, usedAt: null },
-    data: { usedAt: new Date() },
-  });
+  await execute('UPDATE verification_tokens SET usedAt = ? WHERE userId = ? AND type = ? AND usedAt IS NULL', [
+    nowIso(),
+    userId,
+    type,
+  ]);
   const token = generateOpaqueToken(32);
-  await prisma.verificationToken.create({
-    data: {
-      userId,
-      type,
-      tokenHash: hashToken(token),
-      expiresAt: new Date(Date.now() + TOKEN_TTL[type]),
-    },
-  });
+  await execute(
+    `INSERT INTO verification_tokens (id, userId, type, tokenHash, expiresAt, createdAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [newId(), userId, type, hashToken(token), new Date(Date.now() + TOKEN_TTL[type]).toISOString(), nowIso()],
+  );
   return token;
 }
 
 /** Redeem a token. Single use, and enforced atomically against replay. */
 async function consumeVerificationToken(token: string, type: VerificationTokenType): Promise<string | null> {
-  const record = await prisma.verificationToken.findUnique({ where: { tokenHash: hashToken(token) } });
-  if (!record || record.type !== type || record.usedAt || record.expiresAt < new Date()) return null;
+  const row = await queryOne<{ id: string; userId: string; type: string; usedAt: string | null; expiresAt: string }>(
+    'SELECT id, userId, type, usedAt, expiresAt FROM verification_tokens WHERE tokenHash = ?',
+    [hashToken(token)],
+  );
+  if (!row || row.type !== type || row.usedAt || new Date(row.expiresAt) < new Date()) return null;
 
-  const claimed = await prisma.verificationToken.updateMany({
-    where: { id: record.id, usedAt: null },
-    data: { usedAt: new Date() },
-  });
-  return claimed.count === 1 ? record.userId : null;
+  const claimed = await execute('UPDATE verification_tokens SET usedAt = ? WHERE id = ? AND usedAt IS NULL', [
+    nowIso(),
+    row.id,
+  ]);
+  return claimed === 1 ? row.userId : null;
 }
 
-export async function sendVerificationEmail(user: User): Promise<void> {
+export async function sendVerificationEmail(user: UserRow): Promise<void> {
   if (user.emailVerified) return;
   const token = await createVerificationToken(user.id, 'email_verification');
   const message = verificationEmail(user.name, token);
@@ -423,7 +444,7 @@ export async function sendVerificationEmail(user: User): Promise<void> {
 export async function verifyEmail(token: string, meta: RequestMeta): Promise<void> {
   const userId = await consumeVerificationToken(token, 'email_verification');
   if (!userId) throw new AppError(ErrorCode.TOKEN_INVALID);
-  await prisma.user.update({ where: { id: userId }, data: { emailVerified: true } });
+  await execute('UPDATE users SET emailVerified = 1 WHERE id = ?', [userId]);
   await recordAudit({
     userId,
     action: AuditAction.USER_EMAIL_VERIFIED,
@@ -439,8 +460,9 @@ export async function verifyEmail(token: string, meta: RequestMeta): Promise<voi
  * belongs to an account - otherwise this endpoint becomes an account oracle.
  */
 export async function requestPasswordReset(email: string, meta: RequestMeta): Promise<void> {
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) return;
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE email = ?', [email]);
+  if (!row) return;
+  const user = mapUser(row);
 
   const token = await createVerificationToken(user.id, 'password_reset');
   const message = passwordResetEmail(user.name, token);
@@ -457,14 +479,10 @@ export async function resetPassword(token: string, newPassword: string, meta: Re
   const userId = await consumeVerificationToken(token, 'password_reset');
   if (!userId) throw new AppError(ErrorCode.TOKEN_INVALID);
 
-  await prisma.user.update({
-    where: { id: userId },
-    data: {
-      passwordHash: await hashPassword(newPassword),
-      failedLoginAttempts: 0,
-      lockedUntil: null,
-    },
-  });
+  await execute('UPDATE users SET passwordHash = ?, failedLoginAttempts = 0, lockedUntil = NULL WHERE id = ?', [
+    await hashPassword(newPassword),
+    userId,
+  ]);
 
   // A password reset is a recovery action: assume the old sessions are hostile.
   await revokeAllSessions(userId, 'password_reset');
@@ -482,17 +500,15 @@ export async function changePassword(
   newPassword: string,
   options: { revokeOtherSessions: boolean; keepSessionId: string; meta: RequestMeta },
 ): Promise<void> {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user) throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [userId]);
+  if (!row) throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
+  const user = mapUser(row);
 
   if (!(await verifyPassword(user.passwordHash, currentPassword))) {
     throw new AppError(ErrorCode.INVALID_CREDENTIALS);
   }
 
-  await prisma.user.update({
-    where: { id: userId },
-    data: { passwordHash: await hashPassword(newPassword) },
-  });
+  await execute('UPDATE users SET passwordHash = ? WHERE id = ?', [await hashPassword(newPassword), userId]);
 
   if (options.revokeOtherSessions) {
     await revokeAllSessions(userId, 'password_changed', options.keepSessionId);

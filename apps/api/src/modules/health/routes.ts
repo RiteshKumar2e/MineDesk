@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../../lib/prisma.js';
+import { checkDbConnection } from '../../lib/db.js';
 import { redis } from '../../lib/redis.js';
 
 /**
@@ -22,7 +22,7 @@ export async function healthRoutes(app: FastifyInstance): Promise<void> {
     const checks: Record<string, 'ok' | 'fail'> = { database: 'fail', redis: 'fail' };
 
     try {
-      await prisma.$queryRaw`SELECT 1`;
+      await checkDbConnection();
       checks.database = 'ok';
     } catch (error) {
       app.log.error({ err: error }, 'readiness: database check failed');

@@ -1,0 +1,43 @@
+# Render Blueprint for the MineDesk API. Import this at
+# https://dashboard.render.com/blueprints (New + > Blueprint, point it at
+# this repo) - Render reads this file and creates the service below with no
+# further clicking. See DEPLOY.md for the full walkthrough, including why
+# this half of the stack needs a real long-running host (Render/Fly.io) and
+# cannot be a Vercel serverless function: it holds signaling WebSockets open
+# for the life of every agent connection and remote session.
+services:
+  - type: web
+    name: minedesk-api
+    runtime: docker
+    dockerfilePath: ./infrastructure/docker/api.Dockerfile
+    dockerContext: .
+    plan: starter
+    region: singapore
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: API_PORT
+        value: "4000"
+      # Everything below is a secret - set actual values in the Render
+      # dashboard (Environment tab) after the first deploy, not here; this
+      # file is committed to git. `sync: false` just reserves the key so
+      # Render prompts for it instead of silently deploying without it.
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: AGENT_JWT_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: API_PUBLIC_URL
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false

@@ -7,10 +7,10 @@ build/
 .env.local
 .env.*.local
 !.env.example
-apps/api/prisma/*.db
-apps/api/prisma/*.db-journal
-apps/api/prisma/*.db-wal
-apps/api/prisma/*.db-shm
+apps/api/db/*.db
+apps/api/db/*.db-journal
+apps/api/db/*.db-wal
+apps/api/db/*.db-shm
 coverage/
 .DS_Store
 Thumbs.db

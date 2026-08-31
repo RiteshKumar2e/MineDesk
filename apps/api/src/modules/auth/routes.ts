@@ -4,8 +4,9 @@ import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { decryptSecret, encryptSecret, verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
+import { execute, queryOne } from '../../lib/db.js';
 import { asStringArray, toJsonText } from '../../lib/json.js';
-import { prisma } from '../../lib/prisma.js';
+import { mapUser, type UserRow } from '../../lib/models.js';
 import { STRICT_LIMITS } from '../../plugins/security.js';
 import {
   changePasswordSchema,
@@ -81,6 +82,11 @@ function meta(request: FastifyRequest) {
   return { ip: ipAddress, userAgent };
 }
 
+async function findUserById(id: string): Promise<UserRow | null> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM users WHERE id = ?', [id]);
+  return row ? mapUser(row) : null;
+}
+
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   // ---------------------------------------------------------------- register
   app.post('/register', { config: { rateLimit: STRICT_LIMITS.register } }, async (request, reply) => {
@@ -153,7 +159,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const userId = await consumeTwoFactorChallenge(input.challengeToken);
     if (!userId) throw new AppError(ErrorCode.TOKEN_EXPIRED);
 
-    const user = await prisma.user.findUnique({ where: { id: userId } });
+    const user = await findUserById(userId);
     if (!user || !user.twoFactorEnabled) throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
 
     const secret = user.twoFactorSecret ? decryptSecret(user.twoFactorSecret) : null;
@@ -167,7 +173,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (index === -1) throw new AppError(ErrorCode.TWO_FACTOR_INVALID);
       // Backup codes are single use: burn it before issuing anything.
       const remaining = stored.filter((_, i) => i !== index);
-      await prisma.user.update({ where: { id: user.id }, data: { twoFactorBackupCodes: toJsonText(remaining) } });
+      await execute('UPDATE users SET twoFactorBackupCodes = ? WHERE id = ?', [toJsonText(remaining), user.id]);
       usedBackupCode = true;
       backupCodesRemainingCount = remaining.length;
     }
@@ -241,7 +247,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   // --------------------------------------------------------------------- me
   app.get('/me', { preHandler: app.authenticate }, async (request, reply) => {
-    const record = await prisma.user.findUnique({ where: { id: request.user!.id } });
+    const record = await findUserById(request.user!.id);
     if (!record) throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
     return reply.send({ user: toPublicUser(record) });
   });
@@ -257,7 +263,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     '/resend-verification',
     { preHandler: app.authenticate, config: { rateLimit: STRICT_LIMITS.passwordReset } },
     async (request, reply) => {
-      const record = await prisma.user.findUnique({ where: { id: request.user!.id } });
+      const record = await findUserById(request.user!.id);
       if (record) await sendVerificationEmail(record);
       return reply.send({ ok: true });
     },
@@ -319,14 +325,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   // ------------------------------------------------------------------- 2FA
   app.post('/2fa/setup', { preHandler: app.authenticate }, async (request, reply) => {
-    const user = await prisma.user.findUnique({ where: { id: request.user!.id } });
+    const user = await findUserById(request.user!.id);
     if (!user) throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
     if (user.twoFactorEnabled) throw new AppError(ErrorCode.CONFLICT, { message: 'Two-factor is already enabled.' });
 
     // The secret is stored immediately but stays inactive until a code proves
     // the authenticator app was really enrolled.
     const secret = generateTotpSecret();
-    await prisma.user.update({ where: { id: user.id }, data: { twoFactorSecret: encryptSecret(secret) } });
+    await execute('UPDATE users SET twoFactorSecret = ? WHERE id = ?', [encryptSecret(secret), user.id]);
 
     const otpauth = buildOtpAuthUrl(user.email, secret);
     return reply.send({ secret, otpauthUrl: otpauth, qrCode: await buildQrDataUrl(otpauth) });
@@ -337,17 +343,17 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: app.authenticate, config: { rateLimit: STRICT_LIMITS.twoFactor } },
     async (request, reply) => {
       const { code } = enableTwoFactorSchema.parse(request.body);
-      const user = await prisma.user.findUnique({ where: { id: request.user!.id } });
+      const user = await findUserById(request.user!.id);
       if (!user?.twoFactorSecret) throw new AppError(ErrorCode.CONFLICT, { message: 'Start setup first.' });
 
       const secret = decryptSecret(user.twoFactorSecret);
       if (!secret || !verifyTotp(secret, code)) throw new AppError(ErrorCode.TWO_FACTOR_INVALID);
 
       const backup = createBackupCodes();
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { twoFactorEnabled: true, twoFactorBackupCodes: toJsonText(backup.hashed) },
-      });
+      await execute('UPDATE users SET twoFactorEnabled = 1, twoFactorBackupCodes = ? WHERE id = ?', [
+        toJsonText(backup.hashed),
+        user.id,
+      ]);
       await recordAudit({ userId: user.id, action: AuditAction.USER_2FA_ENABLED, ...auditRequestContext(request) });
 
       // The plaintext codes are shown exactly once, here.
@@ -360,7 +366,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: app.authenticate, config: { rateLimit: STRICT_LIMITS.twoFactor } },
     async (request, reply) => {
       const input = disableTwoFactorSchema.parse(request.body);
-      const user = await prisma.user.findUnique({ where: { id: request.user!.id } });
+      const user = await findUserById(request.user!.id);
       if (!user?.twoFactorEnabled) throw new AppError(ErrorCode.CONFLICT, { message: 'Two-factor is not enabled.' });
 
       // Turning off a security control requires the password as well as a code.
@@ -373,10 +379,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         findBackupCode(asStringArray(user.twoFactorBackupCodes), input.code) !== -1;
       if (!ok) throw new AppError(ErrorCode.TWO_FACTOR_INVALID);
 
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { twoFactorEnabled: false, twoFactorSecret: null, twoFactorBackupCodes: toJsonText([]) },
-      });
+      await execute('UPDATE users SET twoFactorEnabled = 0, twoFactorSecret = NULL, twoFactorBackupCodes = ? WHERE id = ?', [
+        toJsonText([]),
+        user.id,
+      ]);
       await recordAudit({ userId: user.id, action: AuditAction.USER_2FA_DISABLED, ...auditRequestContext(request) });
       return reply.send({ ok: true });
     },

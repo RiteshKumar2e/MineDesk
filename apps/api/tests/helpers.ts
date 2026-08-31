@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
-import { prisma } from '../src/lib/prisma.js';
+import { disconnectDb, execute } from '../src/lib/db.js';
 import { redis, redisPublisher, redisSubscriber } from '../src/lib/redis.js';
 
 /**
@@ -17,24 +17,26 @@ export async function withApp(): Promise<FastifyInstance> {
   return app;
 }
 
-/** Wipe every table between tests so they cannot leak state into each other. */
+/**
+ * Wipe every table between tests so they cannot leak state into each other.
+ * Deletes are ordered child-before-parent for clarity, though the schema's
+ * ON DELETE CASCADE (see db/schema.sql) would carry most of this anyway.
+ */
 export async function resetDatabase(): Promise<void> {
-  await prisma.$transaction([
-    prisma.auditLog.deleteMany(),
-    prisma.remoteSession.deleteMany(),
-    prisma.enrollmentCode.deleteMany(),
-    prisma.devicePermission.deleteMany(),
-    prisma.device.deleteMany(),
-    prisma.verificationToken.deleteMany(),
-    prisma.authSession.deleteMany(),
-    prisma.user.deleteMany(),
-  ]);
+  await execute('DELETE FROM audit_logs');
+  await execute('DELETE FROM remote_sessions');
+  await execute('DELETE FROM enrollment_codes');
+  await execute('DELETE FROM device_permissions');
+  await execute('DELETE FROM devices');
+  await execute('DELETE FROM verification_tokens');
+  await execute('DELETE FROM auth_sessions');
+  await execute('DELETE FROM users');
   await redis.flushdb();
 }
 
 export async function closeAll(app: FastifyInstance): Promise<void> {
   await app.close();
-  await prisma.$disconnect();
+  disconnectDb();
   await Promise.allSettled([redis.quit(), redisPublisher.quit(), redisSubscriber.quit()]);
 }
 

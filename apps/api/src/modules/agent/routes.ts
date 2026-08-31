@@ -9,16 +9,39 @@ import path from 'node:path';
 import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { hashPassword, verifyPassword } from '../../lib/crypto.js';
+import { batch, execute, newId, nowIso, queryOne } from '../../lib/db.js';
 import { AppError } from '../../lib/errors.js';
 import { buildIceServers } from '../../lib/ice.js';
 import { asStringArray } from '../../lib/json.js';
+import { mapDevice, mapDevicePermission, type DevicePermissionRow, type DeviceRow } from '../../lib/models.js';
 import { markDeviceOffline, refreshPresence } from '../../lib/presence.js';
-import { prisma } from '../../lib/prisma.js';
 import { signAgentToken } from '../../lib/tokens.js';
 import { createUnattendedDeviceOwner } from '../../modules/auth/service.js';
 import { STRICT_LIMITS } from '../../plugins/security.js';
 import { agentAuthSchema, enrollSchema, selfRegisterSchema } from '../devices/schemas.js';
 import { allocateDeviceId, permissionsOf } from '../devices/service.js';
+
+async function loadDeviceById(id: string): Promise<{ device: DeviceRow; permissions: DevicePermissionRow | null } | null> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM devices WHERE id = ?', [id]);
+  if (!row) return null;
+  const device = mapDevice(row);
+  const permRow = await queryOne<Record<string, unknown>>('SELECT * FROM device_permissions WHERE deviceId = ?', [
+    device.id,
+  ]);
+  return { device, permissions: permRow ? mapDevicePermission(permRow) : null };
+}
+
+async function loadDeviceByDeviceId(
+  deviceId: string,
+): Promise<{ device: DeviceRow; permissions: DevicePermissionRow | null } | null> {
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM devices WHERE deviceId = ?', [deviceId]);
+  if (!row) return null;
+  const device = mapDevice(row);
+  const permRow = await queryOne<Record<string, unknown>>('SELECT * FROM device_permissions WHERE deviceId = ?', [
+    device.id,
+  ]);
+  return { device, permissions: permRow ? mapDevicePermission(permRow) : null };
+}
 
 /**
  * Endpoints the Remote Agent calls. Most are unauthenticated by necessity -
@@ -43,39 +66,35 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const code = normalizeCode(input.code);
     const { ipAddress, userAgent } = auditRequestContext(request);
 
-    const record = await prisma.enrollmentCode.findUnique({
-      where: { code },
-      include: { device: true },
-    });
+    const record = await queryOne<{ id: string; deviceId: string; usedAt: string | null; expiresAt: string }>(
+      'SELECT id, deviceId, usedAt, expiresAt FROM enrollment_codes WHERE code = ?',
+      [code],
+    );
 
     if (!record) throw new AppError(ErrorCode.ENROLLMENT_CODE_INVALID);
     if (record.usedAt) throw new AppError(ErrorCode.ENROLLMENT_CODE_INVALID);
-    if (record.expiresAt < new Date()) throw new AppError(ErrorCode.ENROLLMENT_CODE_EXPIRED);
+    if (new Date(record.expiresAt) < new Date()) throw new AppError(ErrorCode.ENROLLMENT_CODE_EXPIRED);
 
     const secret = generateAgentSecret();
     const secretHash = await hashPassword(secret);
 
     // Claim the code atomically: two agents racing on the same code must not
     // both end up enrolled.
-    const claimed = await prisma.enrollmentCode.updateMany({
-      where: { id: record.id, usedAt: null },
-      data: { usedAt: new Date(), usedIp: ipAddress },
-    });
-    if (claimed.count !== 1) throw new AppError(ErrorCode.ENROLLMENT_CODE_INVALID);
+    const claimed = await execute('UPDATE enrollment_codes SET usedAt = ?, usedIp = ? WHERE id = ? AND usedAt IS NULL', [
+      nowIso(),
+      ipAddress,
+      record.id,
+    ]);
+    if (claimed !== 1) throw new AppError(ErrorCode.ENROLLMENT_CODE_INVALID);
 
-    const device = await prisma.device.update({
-      where: { id: record.deviceId },
-      data: {
-        agentSecretHash: secretHash,
-        enrolledAt: new Date(),
-        revokedAt: null,
-        hostname: input.hostname,
-        os: input.os,
-        osVersion: input.osVersion ?? null,
-        agentVersion: input.agentVersion ?? null,
-      },
-      include: { permissions: true },
-    });
+    await execute(
+      `UPDATE devices SET agentSecretHash = ?, enrolledAt = ?, revokedAt = NULL, hostname = ?, os = ?,
+       osVersion = ?, agentVersion = ?, updatedAt = ? WHERE id = ?`,
+      [secretHash, nowIso(), input.hostname, input.os, input.osVersion ?? null, input.agentVersion ?? null, nowIso(), record.deviceId],
+    );
+    const loaded = await loadDeviceById(record.deviceId);
+    if (!loaded) throw new AppError(ErrorCode.DEVICE_NOT_FOUND);
+    const { device, permissions } = loaded;
 
     await recordAudit({
       userId: device.userId,
@@ -91,7 +110,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       deviceId: device.deviceId,
       deviceName: device.name,
       agentSecret: secret,
-      permissions: permissionsOf(device.permissions),
+      permissions: permissionsOf(permissions),
       signalUrl: `${env.API_PUBLIC_URL.replace(/^http/, 'ws')}/signal`,
       heartbeatIntervalMs: env.AGENT_HEARTBEAT_INTERVAL_MS,
     });
@@ -107,24 +126,39 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
 
     const owner = await createUnattendedDeviceOwner(input.hostname, { ip: ipAddress, userAgent });
     const deviceId = await allocateDeviceId();
+    const deviceRowId = newId();
     const secret = generateAgentSecret();
     const secretHash = await hashPassword(secret);
+    const timestamp = nowIso();
 
-    const device = await prisma.device.create({
-      data: {
-        deviceId,
-        userId: owner.id,
-        name: input.hostname,
-        hostname: input.hostname,
-        os: input.os,
-        osVersion: input.osVersion ?? null,
-        agentVersion: input.agentVersion ?? null,
-        agentSecretHash: secretHash,
-        enrolledAt: new Date(),
-        permissions: { create: {} },
+    await batch([
+      {
+        sql: `INSERT INTO devices (id, deviceId, userId, name, hostname, os, osVersion, agentVersion,
+              agentSecretHash, enrolledAt, createdAt, updatedAt)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          deviceRowId,
+          deviceId,
+          owner.id,
+          input.hostname,
+          input.hostname,
+          input.os,
+          input.osVersion ?? null,
+          input.agentVersion ?? null,
+          secretHash,
+          timestamp,
+          timestamp,
+          timestamp,
+        ],
       },
-      include: { permissions: true },
-    });
+      {
+        sql: `INSERT INTO device_permissions (id, deviceId, updatedAt) VALUES (?, ?, ?)`,
+        args: [newId(), deviceRowId, timestamp],
+      },
+    ]);
+
+    const loaded = await loadDeviceById(deviceRowId);
+    const { device, permissions } = loaded!;
 
     await recordAudit({
       userId: owner.id,
@@ -139,7 +173,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       deviceId: device.deviceId,
       deviceName: device.name,
       agentSecret: secret,
-      permissions: permissionsOf(device.permissions),
+      permissions: permissionsOf(permissions),
       signalUrl: `${env.API_PUBLIC_URL.replace(/^http/, 'ws')}/signal`,
       heartbeatIntervalMs: env.AGENT_HEARTBEAT_INTERVAL_MS,
     });
@@ -150,22 +184,24 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const input = agentAuthSchema.parse(request.body);
     const deviceId = normalizeCode(input.deviceId);
 
-    const device = await prisma.device.findUnique({
-      where: { deviceId },
-      include: { permissions: true },
-    });
+    const loaded = await loadDeviceByDeviceId(deviceId);
 
     // Same failure for "no such device" and "wrong secret": an unauthenticated
     // caller must not be able to probe which device IDs exist.
-    if (!device || !device.agentSecretHash || device.revokedAt) {
+    if (!loaded || !loaded.device.agentSecretHash || loaded.device.revokedAt) {
       throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
     }
-    if (!(await verifyPassword(device.agentSecretHash, input.secret))) {
+    const { device, permissions } = loaded;
+    if (!(await verifyPassword(device.agentSecretHash!, input.secret))) {
       throw new AppError(ErrorCode.AUTHENTICATION_FAILED);
     }
 
     if (input.agentVersion && input.agentVersion !== device.agentVersion) {
-      await prisma.device.update({ where: { id: device.id }, data: { agentVersion: input.agentVersion } });
+      await execute('UPDATE devices SET agentVersion = ?, updatedAt = ? WHERE id = ?', [
+        input.agentVersion,
+        nowIso(),
+        device.id,
+      ]);
     }
 
     const token = await signAgentToken({
@@ -174,13 +210,14 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       userId: device.userId,
     });
 
+    const permissionSet = permissionsOf(permissions);
     return reply.send({
       token: token.token,
       expiresIn: token.expiresIn,
       deviceId: device.deviceId,
       deviceName: device.name,
-      permissions: permissionsOf(device.permissions),
-      capabilities: grantedCapabilities(permissionsOf(device.permissions)),
+      permissions: permissionSet,
+      capabilities: grantedCapabilities(permissionSet),
       unattendedAccessEnabled: device.unattendedAccessEnabled,
       signalUrl: `${env.API_PUBLIC_URL.replace(/^http/, 'ws')}/signal`,
       heartbeatIntervalMs: env.AGENT_HEARTBEAT_INTERVAL_MS,
@@ -192,19 +229,17 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   // in the dashboard reaches the machine without waiting for a new session.
   app.get('/config', { preHandler: app.authenticateAgent }, async (request, reply) => {
     const agent = request.agent!;
-    const device = await prisma.device.findUnique({
-      where: { id: agent.deviceRowId },
-      include: { permissions: true },
-    });
-    if (!device) throw new AppError(ErrorCode.DEVICE_NOT_FOUND);
+    const loaded = await loadDeviceById(agent.deviceRowId);
+    if (!loaded) throw new AppError(ErrorCode.DEVICE_NOT_FOUND);
+    const { device, permissions } = loaded;
 
-    const permissions = permissionsOf(device.permissions);
+    const permissionSet = permissionsOf(permissions);
     return reply.send({
       deviceId: device.deviceId,
       deviceName: device.name,
-      permissions,
-      capabilities: grantedCapabilities(permissions),
-      sharedFolders: asStringArray(device.permissions?.sharedFolders),
+      permissions: permissionSet,
+      capabilities: grantedCapabilities(permissionSet),
+      sharedFolders: asStringArray(permissions?.sharedFolders),
       unattendedAccessEnabled: device.unattendedAccessEnabled,
       iceServers: buildIceServers(device.deviceId),
       heartbeatIntervalMs: env.AGENT_HEARTBEAT_INTERVAL_MS,
@@ -217,10 +252,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
   app.post('/heartbeat', { preHandler: app.authenticateAgent }, async (request, reply) => {
     const agent = request.agent!;
     const alive = await refreshPresence(agent.deviceId);
-    await prisma.device.update({
-      where: { id: agent.deviceRowId },
-      data: { lastSeenAt: new Date() },
-    });
+    await execute('UPDATE devices SET lastSeenAt = ? WHERE id = ?', [nowIso(), agent.deviceRowId]);
     return reply.send({ ok: true, presence: alive ? 'refreshed' : 'stale', serverTime: Date.now() });
   });
 

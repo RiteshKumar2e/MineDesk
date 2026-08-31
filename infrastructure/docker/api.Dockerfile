@@ -8,7 +8,6 @@
 
 FROM node:22-alpine AS base
 WORKDIR /app
-RUN apk add --no-cache openssl
 
 # ---------------------------------------------------------------- dependencies
 FROM base AS deps
@@ -52,9 +51,7 @@ COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/apps/api/dist apps/api/dist
 COPY --from=build /app/apps/api/package.json apps/api/package.json
-COPY --from=build /app/apps/api/prisma apps/api/prisma
-COPY --from=build /app/node_modules/.prisma node_modules/.prisma
-COPY --from=build /app/node_modules/@prisma node_modules/@prisma
+COPY --from=build /app/apps/api/db/schema.sql apps/api/db/schema.sql
 
 USER minedesk
 WORKDIR /app/apps/api

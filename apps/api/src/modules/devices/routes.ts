@@ -4,9 +4,9 @@ import { z } from 'zod';
 import { AuditAction } from '@minedesk/protocol';
 import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
+import { queryAll, queryOne } from '../../lib/db.js';
 import { asStringArray } from '../../lib/json.js';
 import { isDeviceOnline } from '../../lib/presence.js';
-import { prisma } from '../../lib/prisma.js';
 import {
   createDeviceSchema,
   incomingRequestsSchema,
@@ -198,10 +198,10 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
   app.get('/:id/access', async (request, reply) => {
     const { id } = paramsSchema.parse(request.params);
     const device = await getOwnedDevice(request.user!.id, id);
-    const owner = await prisma.user.findUnique({
-      where: { id: device.userId },
-      select: { id: true, email: true, name: true },
-    });
+    const owner = await queryOne<{ id: string; email: string; name: string }>(
+      'SELECT id, email, name FROM users WHERE id = ?',
+      [device.userId],
+    );
 
     // Full multi-user sharing (inviting a specific person, assigning them a
     // role) is still a later phase. What exists today is the unattended
@@ -210,33 +210,28 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     // it* the meaningful "access" question to answer here in the meantime -
     // computed from real connection history rather than a membership table
     // that doesn't exist yet.
-    const nonOwnerSessions = await prisma.remoteSession.groupBy({
-      by: ['userId'],
-      where: { deviceId: device.id, userId: { not: device.userId } },
-      _count: { _all: true },
-      _max: { requestedAt: true },
-    });
+    const nonOwnerSessions = await queryAll<{
+      userId: string;
+      email: string;
+      name: string;
+      sessionCount: number;
+      lastConnectedAt: string;
+    }>(
+      `SELECT rs.userId, u.email, u.name, COUNT(*) as sessionCount, MAX(rs.requestedAt) as lastConnectedAt
+       FROM remote_sessions rs JOIN users u ON u.id = rs.userId
+       WHERE rs.deviceId = ? AND rs.userId != ?
+       GROUP BY rs.userId
+       ORDER BY lastConnectedAt DESC`,
+      [device.id, device.userId],
+    );
 
-    const recentConnectors = nonOwnerSessions.length
-      ? await prisma.user.findMany({
-          where: { id: { in: nonOwnerSessions.map((s) => s.userId) } },
-          select: { id: true, email: true, name: true },
-        })
-      : [];
-
-    const recentConnections = nonOwnerSessions
-      .map((s) => {
-        const user = recentConnectors.find((u) => u.id === s.userId);
-        return user
-          ? {
-              ...user,
-              sessionCount: s._count._all,
-              lastConnectedAt: s._max.requestedAt?.toISOString() ?? null,
-            }
-          : null;
-      })
-      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
-      .sort((a, b) => (b.lastConnectedAt ?? '').localeCompare(a.lastConnectedAt ?? ''));
+    const recentConnections = nonOwnerSessions.map((s) => ({
+      id: s.userId,
+      email: s.email,
+      name: s.name,
+      sessionCount: s.sessionCount,
+      lastConnectedAt: new Date(s.lastConnectedAt).toISOString(),
+    }));
 
     return reply.send({
       authorizedUsers: owner ? [{ ...owner, role: 'owner', addedAt: device.createdAt.toISOString() }] : [],

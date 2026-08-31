@@ -722,6 +722,25 @@ fn spawn_clipboard_sync(channel: Arc<RTCDataChannel>, session_id: String) -> Cli
         let channel = channel.clone();
         let session_id = session_id.clone();
         rt.spawn(async move {
+            // The data channel object exists (this closure has an Arc to it)
+            // well before WebRTC negotiation actually opens it, and the
+            // poller's very first tick always fires - whatever is already on
+            // the clipboard at session start looks like "new" the moment
+            // there is no prior value to compare against. Without this wait,
+            // that first value races the channel and is dropped for good:
+            // the poller already committed it as "seen" by the time this
+            // runs, so a bare failed send here means the controller never
+            // sees it, not just sees it late. Real negotiation finishes well
+            // inside this window; if it never does, the send below still
+            // runs once and warns, same as before.
+            use webrtc::data_channel::data_channel_state::RTCDataChannelState;
+            for _ in 0..20 {
+                if channel.ready_state() == RTCDataChannelState::Open {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
             let message = crate::protocol::InputMessage::ClipboardText { direction: "to-controller".to_string(), text };
             if let Ok(json) = serde_json::to_string(&message) {
                 if let Err(err) = channel.send_text(json).await {

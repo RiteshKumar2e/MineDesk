@@ -1,6 +1,6 @@
 import { env } from '../config/env.js';
 import { redis, REDIS_KEYS } from './redis.js';
-import { prisma } from './prisma.js';
+import { execute, nowIso } from './db.js';
 
 /**
  * Device presence.
@@ -30,12 +30,11 @@ export async function markDeviceOnline(record: PresenceRecord): Promise<void> {
     'EX',
     env.AGENT_PRESENCE_TTL_SECONDS,
   );
-  await prisma.device
-    .updateMany({
-      where: { deviceId: record.deviceId },
-      data: { status: 'online', lastSeenAt: new Date() },
-    })
-    .catch(() => undefined);
+  await execute('UPDATE devices SET status = ?, lastSeenAt = ? WHERE deviceId = ?', [
+    'online',
+    nowIso(),
+    record.deviceId,
+  ]).catch(() => undefined);
 }
 
 /** Called on every heartbeat: extends the TTL without rewriting the payload. */
@@ -47,9 +46,11 @@ export async function refreshPresence(deviceId: string): Promise<boolean> {
 
 export async function markDeviceOffline(deviceId: string): Promise<void> {
   await redis.del(REDIS_KEYS.devicePresence(deviceId));
-  await prisma.device
-    .updateMany({ where: { deviceId }, data: { status: 'offline', lastSeenAt: new Date() } })
-    .catch(() => undefined);
+  await execute('UPDATE devices SET status = ?, lastSeenAt = ? WHERE deviceId = ?', [
+    'offline',
+    nowIso(),
+    deviceId,
+  ]).catch(() => undefined);
 }
 
 export async function getPresence(deviceId: string): Promise<PresenceRecord | null> {

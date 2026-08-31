@@ -1,9 +1,11 @@
 import { AUDIT_LABELS, AuditAction } from '@minedesk/protocol';
+import type { InValue } from '@libsql/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
+import { execute, queryAll } from '../../lib/db.js';
 import { parseJsonObject } from '../../lib/json.js';
-import { prisma } from '../../lib/prisma.js';
+import { mapAuditLog } from '../../lib/models.js';
 
 const querySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
@@ -23,34 +25,50 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', async (request, reply) => {
     const query = querySchema.parse(request.query);
 
-    const entries = await prisma.auditLog.findMany({
-      where: {
-        userId: request.user!.id,
-        ...(query.action ? { action: query.action } : {}),
-        ...(query.deviceId ? { deviceId: query.deviceId } : {}),
-        ...(query.before ? { createdAt: { lt: new Date(query.before) } } : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: query.limit,
-      include: {
-        device: { select: { name: true, deviceId: true } },
-        session: { select: { sessionId: true } },
-      },
-    });
+    const clauses = ['a.userId = ?'];
+    const args: InValue[] = [request.user!.id];
+    if (query.action) {
+      clauses.push('a.action = ?');
+      args.push(query.action);
+    }
+    if (query.deviceId) {
+      clauses.push('a.deviceId = ?');
+      args.push(query.deviceId);
+    }
+    if (query.before) {
+      clauses.push('a.createdAt < ?');
+      args.push(new Date(query.before).toISOString());
+    }
+    args.push(query.limit);
 
-    return reply.send({
-      entries: entries.map((entry) => ({
+    const rows = await queryAll<Record<string, unknown>>(
+      `SELECT a.*, d.name as device_name, s.sessionId as session_sessionId
+       FROM audit_logs a
+       LEFT JOIN devices d ON d.id = a.deviceId
+       LEFT JOIN remote_sessions s ON s.id = a.sessionId
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY a.createdAt DESC LIMIT ?`,
+      args,
+    );
+
+    const entries = rows.map((row) => {
+      const entry = mapAuditLog(row);
+      return {
         id: entry.id,
         action: entry.action,
-        label: AUDIT_LABELS[entry.action] ?? entry.action,
+        label: AUDIT_LABELS[entry.action as AuditAction] ?? entry.action,
         createdAt: entry.createdAt.toISOString(),
         ipAddress: entry.ipAddress,
         deviceId: entry.deviceId,
-        deviceName: entry.device?.name ?? null,
-        sessionId: entry.session?.sessionId ?? null,
+        deviceName: (row.device_name as string | null) ?? null,
+        sessionId: (row.session_sessionId as string | null) ?? null,
         metadata: parseJsonObject(entry.metadata),
-      })),
-      nextCursor: entries.length === query.limit ? entries[entries.length - 1]?.createdAt.toISOString() : null,
+      };
+    });
+
+    return reply.send({
+      entries,
+      nextCursor: entries.length === query.limit ? entries[entries.length - 1]?.createdAt : null,
     });
   });
 
@@ -65,7 +83,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
    * compromised-account investigation would actually need.
    */
   app.delete('/', async (request, reply) => {
-    const { count } = await prisma.auditLog.deleteMany({ where: { userId: request.user!.id } });
+    const count = await execute('DELETE FROM audit_logs WHERE userId = ?', [request.user!.id]);
     await recordAudit({
       userId: request.user!.id,
       action: AuditAction.ACTIVITY_LOG_CLEARED,
@@ -77,18 +95,15 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
 
   /** Distinct action names present in this account's history, for the filter UI. */
   app.get('/actions', async (request, reply) => {
-    const rows = await prisma.auditLog.groupBy({
-      by: ['action'],
-      where: { userId: request.user!.id },
-      _count: { action: true },
-      orderBy: { _count: { action: 'desc' } },
-      take: 40,
-    });
+    const rows = await queryAll<{ action: string; count: number }>(
+      `SELECT action, COUNT(*) as count FROM audit_logs WHERE userId = ? GROUP BY action ORDER BY count DESC LIMIT 40`,
+      [request.user!.id],
+    );
     return reply.send({
       actions: rows.map((row) => ({
         action: row.action,
-        label: AUDIT_LABELS[row.action] ?? row.action,
-        count: row._count.action,
+        label: AUDIT_LABELS[row.action as AuditAction] ?? row.action,
+        count: Number(row.count),
       })),
     });
   });

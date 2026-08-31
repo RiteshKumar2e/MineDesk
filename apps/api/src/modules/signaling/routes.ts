@@ -4,8 +4,8 @@ import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { env } from '../../config/env.js';
 import { recordAudit } from '../../lib/audit.js';
+import { execute, nowIso, queryOne } from '../../lib/db.js';
 import { markDeviceOffline, markDeviceOnline, refreshPresence } from '../../lib/presence.js';
-import { prisma } from '../../lib/prisma.js';
 import { REDIS_KEYS } from '../../lib/redis.js';
 import { isJtiRevoked, verifyAccessToken, verifyAgentToken } from '../../lib/tokens.js';
 import { hub, type HubConnection } from './hub.js';
@@ -47,10 +47,17 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
         const claims = await verifyAgentToken(token);
         if (await isJtiRevoked(claims.jti)) return close(4003, 'TOKEN_INVALID');
 
-        const device = await prisma.device.findUnique({
-          where: { id: claims.sub },
-          select: { id: true, deviceId: true, userId: true, revokedAt: true, agentSecretHash: true, agentVersion: true },
-        });
+        const device = await queryOne<{
+          id: string;
+          deviceId: string;
+          userId: string;
+          revokedAt: string | null;
+          agentSecretHash: string | null;
+          agentVersion: string | null;
+        }>(
+          'SELECT id, deviceId, userId, revokedAt, agentSecretHash, agentVersion FROM devices WHERE id = ?',
+          [claims.sub],
+        );
         if (!device || device.revokedAt || !device.agentSecretHash) return close(4003, 'TOKEN_INVALID');
 
         connection = {
@@ -86,11 +93,11 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
         const claims = await verifyAccessToken(token);
         if (await isJtiRevoked(claims.jti)) return close(4003, 'TOKEN_INVALID');
 
-        const authSession = await prisma.authSession.findUnique({
-          where: { id: claims.sid },
-          select: { revokedAt: true, expiresAt: true },
-        });
-        if (!authSession || authSession.revokedAt || authSession.expiresAt < new Date()) {
+        const authSession = await queryOne<{ revokedAt: string | null; expiresAt: string }>(
+          'SELECT revokedAt, expiresAt FROM auth_sessions WHERE id = ?',
+          [claims.sid],
+        );
+        if (!authSession || authSession.revokedAt || new Date(authSession.expiresAt) < new Date()) {
           return close(4003, 'TOKEN_INVALID');
         }
 
@@ -172,17 +179,19 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
         case 'session:join': {
           // Attaching to a session requires owning it. The session row is the
           // authorization record; the socket only proves who is asking.
-          const session = await prisma.remoteSession.findUnique({
-            where: { sessionId: message.sessionId },
-            select: { id: true, userId: true, deviceId: true, status: true, device: { select: { deviceId: true } } },
-          });
+          const session = await queryOne<{ id: string; userId: string; deviceId: string; status: string; device_deviceId: string }>(
+            `SELECT rs.id, rs.userId, rs.deviceId, rs.status, d.deviceId as device_deviceId
+             FROM remote_sessions rs JOIN devices d ON d.id = rs.deviceId
+             WHERE rs.sessionId = ?`,
+            [message.sessionId],
+          );
 
           const permitted =
             session &&
             session.status !== 'ended' &&
             (connection.role === 'controller'
               ? session.userId === connection.userId
-              : session.device.deviceId === connection.deviceId);
+              : session.device_deviceId === connection.deviceId);
 
           if (!permitted) {
             send({
@@ -255,10 +264,10 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           // cannot mark its own request accepted by forging the frame, because
           // the connection sending it here IS the agent (checked below).
           if (message.type === 'session:accept' && connection.role === 'agent') {
-            await prisma.remoteSession.updateMany({
-              where: { sessionId: message.sessionId, status: 'pending' },
-              data: { status: 'active', startedAt: new Date() },
-            });
+            await execute(`UPDATE remote_sessions SET status = 'active', startedAt = ? WHERE sessionId = ? AND status = 'pending'`, [
+              nowIso(),
+              message.sessionId,
+            ]);
             await recordAudit({
               userId: connection.userId,
               deviceId: connection.deviceRowId,
@@ -269,10 +278,10 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           }
 
           if (message.type === 'session:deny' && connection.role === 'agent') {
-            await prisma.remoteSession.updateMany({
-              where: { sessionId: message.sessionId, status: 'pending' },
-              data: { status: 'denied', endedAt: new Date(), endReason: message.reason },
-            });
+            await execute(
+              `UPDATE remote_sessions SET status = 'denied', endedAt = ?, endReason = ? WHERE sessionId = ? AND status = 'pending'`,
+              [nowIso(), message.reason, message.sessionId],
+            );
             await recordAudit({
               userId: connection.userId,
               deviceId: connection.deviceRowId,
@@ -283,10 +292,11 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           }
 
           if (message.type === 'session:end') {
-            await prisma.remoteSession.updateMany({
-              where: { sessionId: message.sessionId, status: { in: ['pending', 'active', 'reconnecting'] } },
-              data: { status: 'ended', endedAt: new Date(), endReason: message.reason },
-            });
+            await execute(
+              `UPDATE remote_sessions SET status = 'ended', endedAt = ?, endReason = ?
+               WHERE sessionId = ? AND status IN ('pending', 'active', 'reconnecting')`,
+              [nowIso(), message.reason, message.sessionId],
+            );
           }
           return;
         }
@@ -311,13 +321,12 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
 
         // A disconnected agent cannot be in a session; close them out so the
         // dashboard does not show a session that no longer exists.
-        await prisma.remoteSession.updateMany({
-          where: {
-            device: { deviceId: connection.deviceId },
-            status: { in: ['pending', 'active', 'reconnecting'] },
-          },
-          data: { status: 'ended', endedAt: new Date(), endReason: 'agent_disconnected' },
-        });
+        await execute(
+          `UPDATE remote_sessions SET status = 'ended', endedAt = ?, endReason = 'agent_disconnected'
+           WHERE status IN ('pending', 'active', 'reconnecting')
+           AND deviceId IN (SELECT id FROM devices WHERE deviceId = ?)`,
+          [nowIso(), connection.deviceId],
+        );
       }
     });
 

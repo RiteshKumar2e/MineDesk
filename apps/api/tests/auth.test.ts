@@ -64,10 +64,11 @@ describe('auth', () => {
       url: '/api/v1/auth/register',
       payload: { email, name: 'Ada', password: STRONG_PASSWORD },
     });
-    const { prisma } = await import('../src/lib/prisma.js');
-    const row = await prisma.user.findUniqueOrThrow({ where: { email } });
-    expect(row.passwordHash).not.toBe(STRONG_PASSWORD);
-    expect(row.passwordHash.startsWith('$argon2id$')).toBe(true);
+    const { queryOne } = await import('../src/lib/db.js');
+    const row = await queryOne<{ passwordHash: string }>('SELECT passwordHash FROM users WHERE email = ?', [email]);
+    expect(row).not.toBeNull();
+    expect(row!.passwordHash).not.toBe(STRONG_PASSWORD);
+    expect(row!.passwordHash.startsWith('$argon2id$')).toBe(true);
   });
 
   it('logs in with correct credentials and rejects wrong ones identically', async () => {
@@ -232,20 +233,18 @@ describe('auth', () => {
       payload: { email, name: 'Ada', password: STRONG_PASSWORD },
     });
 
-    const { prisma } = await import('../src/lib/prisma.js');
+    const { execute, newId, nowIso, queryOne } = await import('../src/lib/db.js');
     const { hashToken } = await import('../src/lib/crypto.js');
     // The plaintext token only ever exists in the (console-logged) email; for the
     // test we mint one directly against the same table the route reads.
-    const user = await prisma.user.findUniqueOrThrow({ where: { email } });
+    const user = await queryOne<{ id: string }>('SELECT id FROM users WHERE email = ?', [email]);
+    expect(user).not.toBeNull();
     const rawToken = 'test-verification-token-0123456789';
-    await prisma.verificationToken.create({
-      data: {
-        userId: user.id,
-        type: 'email_verification',
-        tokenHash: hashToken(rawToken),
-        expiresAt: new Date(Date.now() + 60_000),
-      },
-    });
+    await execute(
+      `INSERT INTO verification_tokens (id, userId, type, tokenHash, expiresAt, createdAt)
+       VALUES (?, ?, 'email_verification', ?, ?, ?)`,
+      [newId(), user!.id, hashToken(rawToken), new Date(Date.now() + 60_000).toISOString(), nowIso()],
+    );
 
     const first = await app.inject({
       method: 'POST',

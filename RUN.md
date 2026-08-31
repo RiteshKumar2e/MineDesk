@@ -11,8 +11,11 @@ Two things are already true on this machine and don't need setup:
   working (see [Building and running the Rust agent](#building-and-running-the-rust-agent)).
 
 The database is SQLite/libSQL (Turso), not Postgres - it's a plain file
-(`apps/api/prisma/dev.db`), already created and seeded on this machine, so
-**there is nothing to install or run for it**. Docker is only needed for
+(`apps/api/db/dev.db`), already created and seeded on this machine, so
+**there is nothing to install or run for it**. There is no ORM either: the
+API talks to it directly through `@libsql/client` (`apps/api/src/lib/db.ts`),
+and the schema lives as plain SQL in `apps/api/db/schema.sql` - no migration
+engine, no generated client, no `prisma generate` step. Docker is only needed for
 Redis (and optionally coturn); it isn't currently usable from a terminal on
 this machine (no `docker` command on PATH, no working Docker Desktop install
 detected) - see step 2.
@@ -91,10 +94,10 @@ direct P2P or STUN-only connects fine without it.
 ## 3. Configure secrets
 
 `.env` already exists in the repo root with a working local `DATABASE_URL`
-(`file:./prisma/dev.db` - see the note at the end of this section on why
-that path looks different from the CLI's own copy), but the JWT/encryption
-secrets are still the example placeholders - **do not run this past your own
-machine with placeholder secrets.** Generate real ones:
+(`file:./db/dev.db`, resolved relative to `apps/api` since that's the API
+process's working directory), but the JWT/encryption secrets are still the
+example placeholders - **do not run this past your own machine with
+placeholder secrets.** Generate real ones:
 
 ```powershell
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
@@ -104,39 +107,29 @@ Run that three times and paste the results into `.env` for `JWT_SECRET`,
 `AGENT_JWT_SECRET`, and `ENCRYPTION_KEY` (all three must be different
 values).
 
-*Why two different-looking `DATABASE_URL` values exist in this repo*:
-`apps/api/prisma/.env` also has a `DATABASE_URL=file:./dev.db` - that's not
-a mistake or a duplicate to reconcile. The Prisma CLI (`db push`, `migrate`,
-`studio`) resolves a relative `file:` path relative to `schema.prisma`'s own
-directory, while the app's runtime (`@libsql/client`) resolves the same kind
-of path relative to the process's working directory - two different tools,
-two different resolution bases, so the *one* literal string that's correct
-for each is different even though both point at the exact same file,
-`apps/api/prisma/dev.db`. Confirmed by direct testing; see
-`apps/api/src/lib/prisma.ts`'s comment for the one real gotcha this caused
-(import-order-dependent env var poisoning) and how it's fixed.
-
 ## 4. The database schema
 
-Already created and seeded on this machine - `apps/api/prisma/dev.db` exists
+Already created and seeded on this machine - `apps/api/db/dev.db` exists
 with the current schema and a demo account. Skip straight to step 5 unless
 you've reset something. To (re)do it yourself:
 
 ```powershell
 cd apps\api
-npx prisma db push    # creates/updates apps/api/prisma/dev.db from schema.prisma
-npm run db:seed       # optional: seeds the demo account below
+Get-Content db\schema.sql | sqlite3 db\dev.db   # (re)creates every table from scratch
+npm run db:seed                                  # optional: seeds the demo account below
 ```
+
+(No `sqlite3` on PATH? `npx --yes @turso/cli db shell file:db/dev.db < db/schema.sql`
+gets you the same result, or open `db/schema.sql` in any SQLite GUI and run it.)
 
 Demo account: `demo@minedesk.local` / `CorrectHorseBattery9`.
 
 Turning this into a real hosted Turso database later (multi-device access,
-production) means creating a database with the `turso` CLI, then setting
+production) means creating a database with the `turso` CLI, applying
+`db/schema.sql` to it (`turso db shell <name> < db/schema.sql`), then setting
 `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN=...` in
-`.env` - schema changes at that point need to be applied through the `turso`
-CLI (`turso db shell <name> < migration.sql`) rather than `prisma db push`,
-since Prisma's schema engine doesn't speak the remote libSQL protocol
-directly. Not needed for local development.
+`.env` - same schema file either way, just pointed at a different database.
+Not needed for local development.
 
 ## 5. Run the API and web app
 
@@ -161,7 +154,8 @@ below trades for a real device credential - it's single-use and expires, so
 generate it right before you run `enroll`.
 
 **Connecting without an account**: once a device is enrolled, anyone with its
-`RMT-XXXX-XXXX` ID can request a connection at http://localhost:5173/connect
+9-digit ID (e.g. `261 967 268`, shown AnyDesk-style) can request a connection
+at http://localhost:5173/connect
 - no MineDesk account needed, matching AnyDesk's own "just type an address"
 front door. It works via a real but disposable account minted silently
 behind that page (see `createGuestUser`'s comment in
@@ -233,18 +227,14 @@ the device should now show **online** on the dashboard - click it and
     doesn't need a service), but presence, session signaling and rate limiting
     all depend on Redis, so device status and remote sessions won't work
     without it.
-- **`prisma db push` fails with "Environment variable not found: DATABASE_URL"**
-  - `apps/api/prisma/.env` is missing. See step 3's note on why that file
-    exists separately from the root `.env`.
-- **A fresh Prisma-touching script reports "no such table"** even though
-  `apps/api/prisma/dev.db` clearly has the schema (check with
-  `npx prisma studio` or the query in `lib/prisma.ts`'s comment) - this was
-  a real bug hit and fixed during setup: something imported `@prisma/client`
-  before `../config/env.js` ever ran, so Prisma's own auto-loaded
-  `apps/api/prisma/.env` value won the race instead of the app's intended
-  one. `lib/prisma.ts` now imports `env.js` first specifically to prevent
-  this; if you see it again in new code, check that whatever new entry point
-  you added also reaches `env.js` before `@prisma/client`.
+- **API fails at startup with a `DATABASE_URL` or SQLite error** - confirm
+  `.env`'s `DATABASE_URL=file:./db/dev.db` and that `apps/api/db/dev.db`
+  actually exists (see step 4 to recreate it). `/ready`
+  (http://localhost:4000/ready) reports `database` and `redis` health
+  separately if you need to narrow down which one is the problem.
+- **"no such table" on a fresh database** - `db/schema.sql` was never applied.
+  Rerun the `sqlite3`/`turso db shell` command from step 4 against the file
+  `DATABASE_URL` actually points at.
 - **`cargo` / `rustc` not recognized** - you opened a new terminal and
   didn't re-run `. scripts\rust-env.ps1` (see above).
 - **`cargo build` fails on `audiopus_sys` with a CMake error** - confirm

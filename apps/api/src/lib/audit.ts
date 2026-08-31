@@ -1,7 +1,7 @@
 import type { AuditAction } from '@minedesk/protocol';
 import type { FastifyRequest } from 'fastify';
+import { execute, newId, nowIso } from './db.js';
 import { toJsonText } from './json.js';
-import { prisma } from './prisma.js';
 
 export interface AuditContext {
   userId?: string | null;
@@ -63,17 +63,21 @@ function scrub(metadata: Record<string, unknown> | null | undefined): Record<str
 export async function recordAudit(ctx: AuditContext): Promise<void> {
   try {
     const scrubbed = scrub(ctx.metadata);
-    await prisma.auditLog.create({
-      data: {
-        userId: ctx.userId ?? null,
-        deviceId: ctx.deviceId ?? null,
-        sessionId: ctx.sessionId ?? null,
-        action: ctx.action,
-        ipAddress: ctx.ipAddress ?? null,
-        userAgent: ctx.userAgent?.slice(0, 512) ?? null,
-        metadata: scrubbed ? toJsonText(scrubbed) : null,
-      },
-    });
+    await execute(
+      `INSERT INTO audit_logs (id, userId, deviceId, sessionId, action, ipAddress, userAgent, metadata, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        newId(),
+        ctx.userId ?? null,
+        ctx.deviceId ?? null,
+        ctx.sessionId ?? null,
+        ctx.action,
+        ctx.ipAddress ?? null,
+        ctx.userAgent?.slice(0, 512) ?? null,
+        scrubbed ? toJsonText(scrubbed) : null,
+        nowIso(),
+      ],
+    );
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('[audit] failed to persist audit entry', { action: ctx.action, error });

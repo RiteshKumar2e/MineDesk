@@ -14,6 +14,13 @@ async function registerAndLogin(app: FastifyInstance) {
   return { email, accessToken: res.json().accessToken as string };
 }
 
+/**
+ * Creates a device and immediately enrolls it, since a session can only ever
+ * be created against a device an agent has actually enrolled - see the
+ * `agentSecretHash` check in sessions/routes.ts. Every test in this file
+ * exercises what happens *after* that point (online/offline, permissions,
+ * unattended access), never enrollment itself.
+ */
 async function createDevice(app: FastifyInstance, accessToken: string, name = 'Office PC') {
   const res = await app.inject({
     method: 'POST',
@@ -21,6 +28,14 @@ async function createDevice(app: FastifyInstance, accessToken: string, name = 'O
     headers: { authorization: `Bearer ${accessToken}` },
     payload: { name },
   });
+  const { code } = res.json().enrollment;
+
+  await app.inject({
+    method: 'POST',
+    url: '/api/v1/agent/enroll',
+    payload: { code, hostname: 'TEST-PC', os: 'windows', osVersion: '11', agentVersion: '0.1.0' },
+  });
+
   return res.json().device as { id: string; deviceId: string };
 }
 
@@ -52,7 +67,7 @@ describe('session creation', () => {
     expect(res.json().error.code).toBe('DEVICE_OFFLINE');
   });
 
-  it('refuses to connect to another user’s device (IDOR check)', async () => {
+  it('lets a non-owner request a live-consent session by device id, unless incoming requests are disabled', async () => {
     const ownerA = await registerAndLogin(app);
     const ownerB = await registerAndLogin(app);
     const device = await createDevice(app, ownerA.accessToken);
@@ -67,14 +82,41 @@ describe('session creation', () => {
     });
 
     try {
+      // Knowing the device id is enough to *ask* - this is the AnyDesk-style
+      // quick-connect path, not an ownership check. Nothing is granted here;
+      // the session stays `pending` until the owner's machine accepts it.
       const res = await app.inject({
         method: 'POST',
         url: '/api/v1/sessions',
         headers: { authorization: `Bearer ${ownerB.accessToken}` },
         payload: { deviceId: device.deviceId },
       });
-      expect(res.statusCode).toBe(404);
-      expect(res.json().error.code).toBe('DEVICE_NOT_FOUND');
+      expect(res.statusCode).toBe(201);
+      expect(res.json().status).toBe('pending');
+      expect(res.json().unattended).toBe(false);
+
+      await app.inject({
+        method: 'POST',
+        url: `/api/v1/sessions/${res.json().sessionId}/terminate`,
+        headers: { authorization: `Bearer ${ownerB.accessToken}` },
+      });
+
+      // The owner can opt out of unsolicited requests entirely.
+      await app.inject({
+        method: 'PUT',
+        url: `/api/v1/devices/${device.id}/incoming-requests`,
+        headers: { authorization: `Bearer ${ownerA.accessToken}` },
+        payload: { enabled: false },
+      });
+
+      const blocked = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions',
+        headers: { authorization: `Bearer ${ownerB.accessToken}` },
+        payload: { deviceId: device.deviceId },
+      });
+      expect(blocked.statusCode).toBe(403);
+      expect(blocked.json().error.code).toBe('INCOMING_REQUESTS_DISABLED');
     } finally {
       await markDeviceOffline(device.deviceId);
     }
@@ -194,11 +236,15 @@ describe('session creation', () => {
       const other = await registerAndLogin(app);
       const device = await createDevice(app, owner.accessToken);
 
+      // Presenting a password is what invokes the unattended path in
+      // particular (as opposed to the live-consent path, which needs none) -
+      // so this only exercises UNATTENDED_ACCESS_DISABLED with one actually
+      // supplied, wrong shape or not.
       const res = await app.inject({
         method: 'POST',
         url: '/api/v1/sessions',
         headers: { authorization: `Bearer ${other.accessToken}` },
-        payload: { deviceId: device.deviceId },
+        payload: { deviceId: device.deviceId, unattendedPassword: 'whatever' },
       });
       expect(res.statusCode).toBe(403);
       expect(res.json().error.code).toBe('UNATTENDED_ACCESS_DISABLED');

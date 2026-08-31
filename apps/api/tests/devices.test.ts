@@ -36,7 +36,7 @@ describe('devices', () => {
 
     expect(res.statusCode).toBe(201);
     const body = res.json();
-    expect(body.device.deviceId).toMatch(/^RMT-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
+    expect(body.device.deviceId).toMatch(/^\d{9}$/);
     expect(body.device.status).toBe('offline');
     expect(body.enrollment.code).toMatch(/^ENR-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
     // Conservative defaults: view/control on, everything invasive off.

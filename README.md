@@ -407,17 +407,14 @@ Start Redis (coturn is optional for Phase 1 - nothing needs TURN yet):
 docker compose up -d redis
 ```
 
-Apply the database schema:
+Apply the database schema (plain SQL, no ORM or migration engine - see
+`apps/api/db/schema.sql`):
 
 ```bash
 cd apps/api
-npx prisma db push    # creates/updates apps/api/prisma/dev.db from schema.prisma
+sqlite3 db/dev.db < db/schema.sql   # or: npx --yes @turso/cli db shell file:db/dev.db < db/schema.sql
 cd ../..
 ```
-
-(`apps/api/prisma/.env` supplies `DATABASE_URL` for this command
-specifically - see its comment, and `apps/api/src/lib/prisma.ts`'s, for why
-it's a separate file from the root `.env` and not a mistake to merge.)
 
 Optional: seed a demo account (`demo@minedesk.local` / `CorrectHorseBattery9`,
 pre-verified so you can skip the email step):
@@ -461,15 +458,16 @@ logic and does not need infrastructure.
 
 ### 3. Integration tests (need the database + Redis)
 
-These hit a real database rather than mocking Prisma, because the things
-worth testing - unique constraints, password hashing, refresh-token rotation,
-transactional revocation - are exactly what a mock gets wrong silently.
+These hit a real database rather than mocking the data layer, because the
+things worth testing - unique constraints, password hashing, refresh-token
+rotation, transactional revocation - are exactly what a mock gets wrong
+silently.
 
 ```bash
 docker compose up -d redis
 cd apps/api
-npx prisma db push                # first time only - creates apps/api/prisma/dev.db
-npm test                          # runs auth.test.ts + devices.test.ts + paths.test.ts
+sqlite3 db/dev.db < db/schema.sql   # first time only - creates apps/api/db/dev.db
+npm test                            # runs auth.test.ts + devices.test.ts + paths.test.ts
 ```
 
 What's covered:
@@ -565,10 +563,6 @@ and the frame parser are all wired correctly independent of the agent.
 - Team/shared-device ownership is single-owner only; the `/devices/:id/access`
   endpoint returns a one-row list today and is where multi-user sharing will
   attach later.
-- Prisma is pinned to 5.x (stable, zero known vulnerabilities) rather than the
-  newly-released 8.x line, to avoid an unrelated major-version migration in
-  this phase.
-
 ## Roadmap
 
 - ~~**Phase 2** - Remote Agent (Rust, Windows-first), WebRTC screen/input
@@ -599,11 +593,11 @@ Not exercised in this phase, but the pieces are already shaped for it:
 - **API**: the provided Dockerfile to any container host (Fly.io, Render,
   ECS, Azure Container Apps); it's stateless, so it scales horizontally behind
   a load balancer as soon as the database/Redis are reachable
-- **Database**: a hosted Turso (libSQL) database - `turso db create`, then set
-  `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN`. Schema
-  changes go through the `turso` CLI (`turso db shell <name> < migration.sql`),
-  not `prisma db push`/`migrate`, since Prisma's schema engine only speaks to
-  a local file directly, not the remote libSQL protocol.
+- **Database**: a hosted Turso (libSQL) database - `turso db create`, apply
+  `apps/api/db/schema.sql` (`turso db shell <name> < apps/api/db/schema.sql`),
+  then set `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN`.
+  There's no ORM or migration engine in the way - it's the same plain SQL
+  file either way, just applied to a different database.
 - **Redis**: managed Redis (Upstash, ElastiCache...) - required for presence
   and cross-replica signaling once you run more than one API instance
 - **TURN**: a dedicated coturn instance with a public IP; `TURN_STATIC_SECRET`

@@ -55,7 +55,7 @@ services:
       # database survives container recreation. Point this at a real
       # libsql://<name>.turso.io URL (with DATABASE_AUTH_TOKEN) instead to
       # use hosted Turso and drop the volume entirely.
-      DATABASE_URL: ${DATABASE_URL:-file:./prisma/data/dev.db}
+      DATABASE_URL: ${DATABASE_URL:-file:./db/data/dev.db}
       DATABASE_AUTH_TOKEN: ${DATABASE_AUTH_TOKEN:-}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
@@ -69,7 +69,7 @@ services:
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET}
       TURN_REALM: ${TURN_REALM:-minedesk.local}
     volumes:
-      - api-db-data:/app/apps/api/prisma/data
+      - api-db-data:/app/apps/api/db/data
     ports:
       - "4000:4000"
     profiles: ["full"]

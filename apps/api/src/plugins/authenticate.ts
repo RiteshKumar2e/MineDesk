@@ -1,8 +1,8 @@
 import { ErrorCode } from '@minedesk/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
+import { queryOne } from '../lib/db.js';
 import { AppError } from '../lib/errors.js';
-import { prisma } from '../lib/prisma.js';
 import { isJtiRevoked, verifyAccessToken, verifyAgentToken } from '../lib/tokens.js';
 
 export interface AuthenticatedUser {
@@ -76,27 +76,32 @@ export const authenticatePlugin = fp(async (app: FastifyInstance) => {
 
     if (await isJtiRevoked(claims.jti)) throw new AppError(ErrorCode.TOKEN_INVALID);
 
-    const authSession = await prisma.authSession.findUnique({
-      where: { id: claims.sid },
-      select: {
-        id: true,
-        revokedAt: true,
-        expiresAt: true,
-        user: { select: { id: true, email: true, name: true, emailVerified: true } },
-      },
-    });
+    const row = await queryOne<{
+      id: string;
+      revokedAt: string | null;
+      expiresAt: string;
+      userId: string;
+      email: string;
+      name: string;
+      emailVerified: number;
+    }>(
+      `SELECT s.id, s.revokedAt, s.expiresAt, u.id as userId, u.email, u.name, u.emailVerified
+       FROM auth_sessions s JOIN users u ON u.id = s.userId
+       WHERE s.id = ?`,
+      [claims.sid],
+    );
 
-    if (!authSession || authSession.revokedAt || authSession.expiresAt < new Date()) {
+    if (!row || row.revokedAt || new Date(row.expiresAt) < new Date()) {
       throw new AppError(ErrorCode.TOKEN_INVALID);
     }
-    if (authSession.user.id !== claims.sub) throw new AppError(ErrorCode.TOKEN_INVALID);
+    if (row.userId !== claims.sub) throw new AppError(ErrorCode.TOKEN_INVALID);
 
     request.user = {
-      id: authSession.user.id,
-      email: authSession.user.email,
-      name: authSession.user.name,
-      emailVerified: authSession.user.emailVerified,
-      authSessionId: authSession.id,
+      id: row.userId,
+      email: row.email,
+      name: row.name,
+      emailVerified: row.emailVerified === 1,
+      authSessionId: row.id,
       jti: claims.jti,
       exp: typeof claims.exp === 'number' ? claims.exp : 0,
     };
@@ -122,10 +127,13 @@ export const authenticatePlugin = fp(async (app: FastifyInstance) => {
     if (await isJtiRevoked(claims.jti)) throw new AppError(ErrorCode.TOKEN_INVALID);
 
     // A revoked or deleted device must lose access immediately, not in 15 minutes.
-    const device = await prisma.device.findUnique({
-      where: { id: claims.sub },
-      select: { id: true, deviceId: true, userId: true, revokedAt: true, agentSecretHash: true },
-    });
+    const device = await queryOne<{
+      id: string;
+      deviceId: string;
+      userId: string;
+      revokedAt: string | null;
+      agentSecretHash: string | null;
+    }>('SELECT id, deviceId, userId, revokedAt, agentSecretHash FROM devices WHERE id = ?', [claims.sub]);
     if (!device || device.revokedAt || !device.agentSecretHash) {
       throw new AppError(ErrorCode.TOKEN_INVALID);
     }
