@@ -9,15 +9,18 @@
 //   * Audit rows survive the deletion of the session they describe (SetNull),
 //     because the security record must outlive the thing it records.
 
-// SQLite/libSQL (Turso) datasource. Enums and native arrays don't exist on
-// this connector - the four enums that used to live here (DeviceOs,
+// SQLite/libSQL (Turso) datasource. Enums, native arrays, and (on this
+// connector, confirmed against Prisma 5.22 - `prisma generate` refuses to
+// validate a schema with a Json field on the sqlite provider) even the Json
+// type don't exist here. The four enums that used to live here (DeviceOs,
 // DeviceStatus, SessionStatus, VerificationTokenType) are now plain String
 // columns, validated the same way they always were meant to be validated:
 // by the zod schemas at the API boundary (see modules/*/schemas.ts), not by
-// the database. The `[]`-suffixed fields below (twoFactorBackupCodes,
-// sharedFolders, grantedCapabilities) are Json instead of String[] for the
-// same reason - see lib/json.ts's `asStringArray` for how application code
-// reads them back as the plain string arrays they always logically were.
+// the database. The fields below that used to be String[] or Json
+// (twoFactorBackupCodes, sharedFolders, grantedCapabilities, AuditLog's
+// metadata) are plain String columns holding JSON text - see lib/json.ts's
+// `asStringArray`/`toJsonText`/`parseJsonObject` for how application code
+// serializes and reads them back.
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["driverAdapters"]
@@ -38,8 +41,8 @@ model User {
   // Two-factor authentication (TOTP). The secret is encrypted at rest.
   twoFactorEnabled       Boolean  @default(false)
   twoFactorSecret        String?
-  /// string[] of hashed backup codes, stored as Json - see the file-level comment.
-  twoFactorBackupCodes   Json     @default("[]")
+  /// string[] of hashed backup codes, stored as JSON text - see the file-level comment.
+  twoFactorBackupCodes   String   @default("[]")
 
   // Brute-force protection state, kept here so it survives a Redis flush.
   failedLoginAttempts Int       @default(0)
@@ -164,9 +167,9 @@ model DevicePermission {
   camera       Boolean @default(false)
   microphone   Boolean @default(false)
 
-  /// string[] of absolute paths shared for file transfer, stored as Json -
-  /// see the file-level comment. Empty = no file access.
-  sharedFolders Json @default("[]")
+  /// string[] of absolute paths shared for file transfer, stored as JSON text
+  /// - see the file-level comment. Empty = no file access.
+  sharedFolders String @default("[]")
 
   updatedAt DateTime @updatedAt
 
@@ -205,8 +208,8 @@ model RemoteSession {
 
   /// Snapshot of the capabilities authorized when the session was created, so
   /// that later permission edits cannot silently widen a running session.
-  /// string[] of Capability values, stored as Json - see the file-level comment.
-  grantedCapabilities Json    @default("[]")
+  /// string[] of Capability values, stored as JSON text - see the file-level comment.
+  grantedCapabilities String  @default("[]")
   unattended          Boolean @default(false)
 
   /// Which capabilities actually became active during the session.
@@ -249,8 +252,9 @@ model AuditLog {
   action    String
   ipAddress String?
   userAgent String?
-  /// Structured context. Never contains passwords, tokens or file contents.
-  metadata  Json?
+  /// Structured context, stored as JSON text (see the file-level comment).
+  /// Never contains passwords, tokens or file contents.
+  metadata  String?
   createdAt DateTime @default(now())
 
   @@index([userId, createdAt])

@@ -7,7 +7,7 @@ import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
 import { buildIceServers } from '../../lib/ice.js';
-import { asStringArray } from '../../lib/json.js';
+import { asStringArray, toJsonText } from '../../lib/json.js';
 import { getPresence, isDeviceOnline } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 import { clearUnattendedFailures, isUnattendedAccessLocked, recordUnattendedFailure } from '../../lib/unattendedLockout.js';
@@ -150,7 +150,7 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         deviceId: device.id,
         status: 'pending',
         unattended: device.unattendedAccessEnabled,
-        grantedCapabilities: capabilities,
+        grantedCapabilities: toJsonText(capabilities),
         controllerIp: ipAddress,
       },
     });

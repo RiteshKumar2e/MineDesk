@@ -6,6 +6,7 @@ import type { Device, DevicePermission, Prisma, RemoteSession } from '@prisma/cl
 import { recordAudit } from '../../lib/audit.js';
 import { hashPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
+import { toJsonText } from '../../lib/json.js';
 import { getPresenceMap } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 
@@ -205,17 +206,18 @@ export async function updatePermissions(
   const sharedFolders = Array.isArray(input.sharedFolders)
     ? (input.sharedFolders as string[]).map((f) => f.trim()).filter(Boolean)
     : undefined;
+  const sharedFoldersJson = sharedFolders ? toJsonText(sharedFolders) : undefined;
 
   const data: Prisma.DevicePermissionUpsertArgs['create'] = {
     ...next,
-    ...(sharedFolders ? { sharedFolders } : {}),
+    ...(sharedFoldersJson ? { sharedFolders: sharedFoldersJson } : {}),
     deviceId: device.id,
   };
 
   await prisma.devicePermission.upsert({
     where: { deviceId: device.id },
     create: data,
-    update: { ...next, ...(sharedFolders ? { sharedFolders } : {}) },
+    update: { ...next, ...(sharedFoldersJson ? { sharedFolders: sharedFoldersJson } : {}) },
   });
 
   const changed = Object.keys(next).filter((key) => next[key as keyof PermissionSet] !== current[key as keyof PermissionSet]);

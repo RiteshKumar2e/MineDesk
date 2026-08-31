@@ -10,8 +10,8 @@ import { prisma } from './prisma.js';
  * mid-session, the key simply lapses and the device is correctly reported
  * offline within AGENT_PRESENCE_TTL_SECONDS.
  *
- * The `status` column in Postgres is a denormalized convenience for listing and
- * for history; Redis is authoritative for "can I connect right now?".
+ * The `status` column in the database is a denormalized convenience for
+ * listing and for history; Redis is authoritative for "can I connect right now?".
  */
 export interface PresenceRecord {
   deviceId: string;

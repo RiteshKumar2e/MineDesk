@@ -4,10 +4,12 @@ import { prisma } from '../src/lib/prisma.js';
 import { redis, redisPublisher, redisSubscriber } from '../src/lib/redis.js';
 
 /**
- * Integration tests run against a real Postgres and Redis (see docker-compose.yml)
- * rather than mocks - password hashing, unique constraints, transactions and
- * token rotation are exactly the things a mock would get wrong silently.
- * Point DATABASE_URL / REDIS_URL at disposable instances before running these.
+ * Integration tests run against a real SQLite/libSQL database and Redis (see
+ * docker-compose.yml for Redis; the database is just a local file - see
+ * RUN.md) rather than mocks - password hashing, unique constraints,
+ * transactions and token rotation are exactly the things a mock would get
+ * wrong silently. Point DATABASE_URL / REDIS_URL at disposable instances
+ * before running these.
  */
 export async function withApp(): Promise<FastifyInstance> {
   const app = await buildApp();

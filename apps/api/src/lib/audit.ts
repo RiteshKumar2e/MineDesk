@@ -1,5 +1,6 @@
 import type { AuditAction } from '@minedesk/protocol';
 import type { FastifyRequest } from 'fastify';
+import { toJsonText } from './json.js';
 import { prisma } from './prisma.js';
 
 export interface AuditContext {
@@ -61,6 +62,7 @@ function scrub(metadata: Record<string, unknown> | null | undefined): Record<str
  */
 export async function recordAudit(ctx: AuditContext): Promise<void> {
   try {
+    const scrubbed = scrub(ctx.metadata);
     await prisma.auditLog.create({
       data: {
         userId: ctx.userId ?? null,
@@ -69,7 +71,7 @@ export async function recordAudit(ctx: AuditContext): Promise<void> {
         action: ctx.action,
         ipAddress: ctx.ipAddress ?? null,
         userAgent: ctx.userAgent?.slice(0, 512) ?? null,
-        metadata: (scrub(ctx.metadata) ?? undefined) as never,
+        metadata: scrubbed ? toJsonText(scrubbed) : null,
       },
     });
   } catch (error) {

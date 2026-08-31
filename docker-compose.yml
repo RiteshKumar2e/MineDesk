@@ -1,27 +1,14 @@
 # MineDesk development stack.
 #   docker compose up -d              # everything
-#   docker compose up -d postgres redis coturn   # infra only, run api/web on the host
+#   docker compose up -d redis coturn   # infra only, run api/web on the host
+#
+# There is no Postgres service: the database is SQLite/libSQL (Turso), which
+# for local development is just a file (see RUN.md / .env's DATABASE_URL) -
+# nothing to containerize. A real Turso database needs no local service
+# either. Redis and coturn remain real services either way.
 name: minedesk
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: minedesk-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-minedesk}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-minedesk}
-      POSTGRES_DB: ${POSTGRES_DB:-minedesk}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-minedesk} -d ${POSTGRES_DB:-minedesk}"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   redis:
     image: redis:7-alpine
     container_name: minedesk-redis
@@ -58,15 +45,18 @@ services:
     container_name: minedesk-api
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
       NODE_ENV: production
       API_HOST: 0.0.0.0
       API_PORT: "4000"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-minedesk}:${POSTGRES_PASSWORD:-minedesk}@postgres:5432/${POSTGRES_DB:-minedesk}?schema=public
+      # A local file inside the named volume below by default, so the
+      # database survives container recreation. Point this at a real
+      # libsql://<name>.turso.io URL (with DATABASE_AUTH_TOKEN) instead to
+      # use hosted Turso and drop the volume entirely.
+      DATABASE_URL: ${DATABASE_URL:-file:./prisma/data/dev.db}
+      DATABASE_AUTH_TOKEN: ${DATABASE_AUTH_TOKEN:-}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
       AGENT_JWT_SECRET: ${AGENT_JWT_SECRET}
@@ -78,6 +68,8 @@ services:
       TURN_SERVER: ${TURN_SERVER:-turn:localhost:3478}
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET}
       TURN_REALM: ${TURN_REALM:-minedesk.local}
+    volumes:
+      - api-db-data:/app/apps/api/prisma/data
     ports:
       - "4000:4000"
     profiles: ["full"]
@@ -97,5 +89,5 @@ services:
     profiles: ["full"]
 
 volumes:
-  postgres-data:
   redis-data:
+  api-db-data:

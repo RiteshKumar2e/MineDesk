@@ -10,7 +10,7 @@ import { env } from '../config/env.js';
  *   ratelimit:*                  distributed counters for @fastify/rate-limit
  *
  * Losing Redis degrades presence and cross-replica routing; it never loses
- * users, devices or audit history, which live in Postgres.
+ * users, devices or audit history, which live in the SQLite/libSQL database.
  */
 const options = {
   maxRetriesPerRequest: null as null,

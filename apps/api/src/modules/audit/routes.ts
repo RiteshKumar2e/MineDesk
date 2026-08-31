@@ -1,6 +1,7 @@
 import { AUDIT_LABELS } from '@minedesk/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { parseJsonObject } from '../../lib/json.js';
 import { prisma } from '../../lib/prisma.js';
 
 const querySchema = z.object({
@@ -46,7 +47,7 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
         deviceId: entry.deviceId,
         deviceName: entry.device?.name ?? null,
         sessionId: entry.session?.sessionId ?? null,
-        metadata: entry.metadata as Record<string, unknown> | null,
+        metadata: parseJsonObject(entry.metadata),
       })),
       nextCursor: entries.length === query.limit ? entries[entries.length - 1]?.createdAt.toISOString() : null,
     });

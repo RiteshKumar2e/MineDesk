@@ -10,12 +10,12 @@ Two things are already true on this machine and don't need setup:
 - The Rust toolchain needed to build `apps/agent` is installed and proven
   working (see [Building and running the Rust agent](#building-and-running-the-rust-agent)).
 
-One thing is **not** true yet and blocks everything else:
-
-- **Docker is not currently usable from a terminal on this machine** (no
-  `docker` command on PATH, no working Docker Desktop install detected).
-  The API and web app run directly on Node either way, but PostgreSQL and
-  Redis need to come from *somewhere* - see step 2.
+The database is SQLite/libSQL (Turso), not Postgres - it's a plain file
+(`apps/api/prisma/dev.db`), already created and seeded on this machine, so
+**there is nothing to install or run for it**. Docker is only needed for
+Redis (and optionally coturn); it isn't currently usable from a terminal on
+this machine (no `docker` command on PATH, no working Docker Desktop install
+detected) - see step 2.
 
 ## 1. Install dependencies
 
@@ -24,11 +24,12 @@ cd C:\Users\anmol\OneDrive\Desktop\MineDesk
 npm install
 ```
 
-## 2. Get PostgreSQL and Redis running
+## 2. Get Redis running
 
-You need both reachable at the URLs already set in `.env`
-(`postgresql://minedesk:...@localhost:5432/minedesk`,
-`redis://localhost:6379`). Pick **one** of these:
+The API needs Redis reachable at `redis://localhost:6379` (presence,
+pub/sub, rate limiting - see `apps/api/src/lib/redis.ts`). It is **not**
+running on this machine right now (confirmed: no `docker` CLI, and WSL2's
+Ubuntu distro has no `redis-server` installed either). Pick one:
 
 ### Option A - Docker Desktop (recommended, matches `docker-compose.yml`)
 
@@ -38,40 +39,39 @@ You need both reachable at the URLs already set in `.env`
    after install.
 2. From the repo root:
    ```powershell
-   npm run infra:up   # docker compose up -d postgres redis coturn
+   npm run infra:up   # docker compose up -d redis coturn
    ```
-3. Confirm all three are healthy:
+3. Confirm it's healthy:
    ```powershell
    docker compose ps
    ```
 
-### Option B - No Docker: native Postgres + Redis
+### Option B - No Docker: Redis inside WSL2
 
-If you'd rather not install Docker Desktop:
+WSL2 itself is already installed on this machine (Ubuntu, default), just
+without Redis yet:
 
-- **PostgreSQL**: install from https://www.postgresql.org/download/windows/
-  (official Windows installer). During setup, create a database and user
-  matching `.env`'s `DATABASE_URL` - or just use the installer's default
-  `postgres` superuser and edit `.env`'s `DATABASE_URL` to match whatever
-  you set.
-- **Redis**: there's no official Redis build for Windows. Easiest options:
-  - Enable WSL2 (`wsl --install`) and run real Redis inside it
-    (`sudo apt install redis-server && redis-server --daemonize yes`) - it's
-    still reachable at `redis://localhost:6379` from Windows.
-  - Or install [Memurai](https://www.memurai.com/) (a Redis-protocol-
-    compatible Windows service) as a native alternative.
-- **coturn (TURN server)**: only needed for WebRTC to work when the browser
-  and agent can't reach each other directly (symmetric NAT, strict
-  firewalls). Skip it for now - on a single machine or simple LAN, direct
-  P2P or STUN-only will connect fine without it. If you need it later, run
-  it inside WSL2 or a container.
+```powershell
+wsl -e bash -c "sudo apt update && sudo apt install -y redis-server && sudo service redis-server start"
+```
+
+It's reachable at `redis://localhost:6379` from Windows once running. To
+start it again after a reboot: `wsl -e bash -c "sudo service redis-server start"`.
+(Or install [Memurai](https://www.memurai.com/), a native Windows
+Redis-protocol-compatible service, instead - no WSL involved.)
+
+**coturn (TURN server)** is separate from Redis and only needed for WebRTC
+when the browser and agent can't reach each other directly (symmetric NAT,
+strict firewalls). Skip it for now - on a single machine or simple LAN,
+direct P2P or STUN-only connects fine without it.
 
 ## 3. Configure secrets
 
-`.env` already exists in the repo root with working localhost URLs, but the
-JWT/encryption secrets and Postgres/TURN passwords are almost certainly
-still the example placeholders (`change-me-postgres`, etc.) - **do not run
-this past your own machine with placeholder secrets.** Generate real ones:
+`.env` already exists in the repo root with a working local `DATABASE_URL`
+(`file:./prisma/dev.db` - see the note at the end of this section on why
+that path looks different from the CLI's own copy), but the JWT/encryption
+secrets are still the example placeholders - **do not run this past your own
+machine with placeholder secrets.** Generate real ones:
 
 ```powershell
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
@@ -79,23 +79,41 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 
 Run that three times and paste the results into `.env` for `JWT_SECRET`,
 `AGENT_JWT_SECRET`, and `ENCRYPTION_KEY` (all three must be different
-values). Also set `POSTGRES_PASSWORD` (and match it inside `DATABASE_URL`)
-to something real if you're using Option A.
+values).
 
-## 4. Create the database schema
+*Why two different-looking `DATABASE_URL` values exist in this repo*:
+`apps/api/prisma/.env` also has a `DATABASE_URL=file:./dev.db` - that's not
+a mistake or a duplicate to reconcile. The Prisma CLI (`db push`, `migrate`,
+`studio`) resolves a relative `file:` path relative to `schema.prisma`'s own
+directory, while the app's runtime (`@libsql/client`) resolves the same kind
+of path relative to the process's working directory - two different tools,
+two different resolution bases, so the *one* literal string that's correct
+for each is different even though both point at the exact same file,
+`apps/api/prisma/dev.db`. Confirmed by direct testing; see
+`apps/api/src/lib/prisma.ts`'s comment for the one real gotcha this caused
+(import-order-dependent env var poisoning) and how it's fixed.
+
+## 4. The database schema
+
+Already created and seeded on this machine - `apps/api/prisma/dev.db` exists
+with the current schema and a demo account. Skip straight to step 5 unless
+you've reset something. To (re)do it yourself:
 
 ```powershell
-npm run db:migrate    # applies Prisma migrations
-npm run db:generate   # regenerates the Prisma client
+cd apps\api
+npx prisma db push    # creates/updates apps/api/prisma/dev.db from schema.prisma
+npm run db:seed       # optional: seeds the demo account below
 ```
 
-Optional - a pre-verified demo account so you can skip email verification:
+Demo account: `demo@minedesk.local` / `CorrectHorseBattery9`.
 
-```powershell
-npm run db:seed
-```
-
-Logs in as `demo@minedesk.local` / `CorrectHorseBattery9`.
+Turning this into a real hosted Turso database later (multi-device access,
+production) means creating a database with the `turso` CLI, then setting
+`DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN=...` in
+`.env` - schema changes at that point need to be applied through the `turso`
+CLI (`turso db shell <name> < migration.sql`) rather than `prisma db push`,
+since Prisma's schema engine doesn't speak the remote libSQL protocol
+directly. Not needed for local development.
 
 ## 5. Run the API and web app
 
@@ -177,10 +195,23 @@ the device should now show **online** on the dashboard - click it and
 
 ## Troubleshooting
 
-- **`npm run dev` can't reach the database** - Postgres/Redis aren't up, or
-  `.env`'s `DATABASE_URL`/`REDIS_URL` don't match how you set them up in
-  step 2. Test Postgres directly: `docker compose logs postgres` (Option A)
-  or check the native service is running (Option B).
+- **`npm run dev` logs repeated `[ioredis] Unhandled error event: ECONNREFUSED`**
+  - Redis isn't up yet. Do step 2. The API will otherwise start (SQLite
+  doesn't need a service), but presence, session signaling and rate limiting
+  all depend on Redis, so device status and remote sessions won't work
+  without it.
+- **`prisma db push` fails with "Environment variable not found: DATABASE_URL"**
+  - `apps/api/prisma/.env` is missing. See step 3's note on why that file
+  exists separately from the root `.env`.
+- **A fresh Prisma-touching script reports "no such table"** even though
+  `apps/api/prisma/dev.db` clearly has the schema (check with
+  `npx prisma studio` or the query in `lib/prisma.ts`'s comment) - this was
+  a real bug hit and fixed during setup: something imported `@prisma/client`
+  before `../config/env.js` ever ran, so Prisma's own auto-loaded
+  `apps/api/prisma/.env` value won the race instead of the app's intended
+  one. `lib/prisma.ts` now imports `env.js` first specifically to prevent
+  this; if you see it again in new code, check that whatever new entry point
+  you added also reaches `env.js` before `@prisma/client`.
 - **`cargo` / `rustc` not recognized** - you opened a new terminal and
   didn't re-run `. scripts\rust-env.ps1` (see above).
 - **`cargo build` fails on `audiopus_sys` with a CMake error** - confirm

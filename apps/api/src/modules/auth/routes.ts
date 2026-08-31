@@ -4,7 +4,7 @@ import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { decryptSecret, encryptSecret, verifyPassword } from '../../lib/crypto.js';
 import { AppError } from '../../lib/errors.js';
-import { asStringArray } from '../../lib/json.js';
+import { asStringArray, toJsonText } from '../../lib/json.js';
 import { prisma } from '../../lib/prisma.js';
 import { STRICT_LIMITS } from '../../plugins/security.js';
 import {
@@ -148,7 +148,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (index === -1) throw new AppError(ErrorCode.TWO_FACTOR_INVALID);
       // Backup codes are single use: burn it before issuing anything.
       const remaining = stored.filter((_, i) => i !== index);
-      await prisma.user.update({ where: { id: user.id }, data: { twoFactorBackupCodes: remaining } });
+      await prisma.user.update({ where: { id: user.id }, data: { twoFactorBackupCodes: toJsonText(remaining) } });
       usedBackupCode = true;
       backupCodesRemainingCount = remaining.length;
     }
@@ -327,7 +327,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       const backup = createBackupCodes();
       await prisma.user.update({
         where: { id: user.id },
-        data: { twoFactorEnabled: true, twoFactorBackupCodes: backup.hashed },
+        data: { twoFactorEnabled: true, twoFactorBackupCodes: toJsonText(backup.hashed) },
       });
       await recordAudit({ userId: user.id, action: AuditAction.USER_2FA_ENABLED, ...auditRequestContext(request) });
 
@@ -356,7 +356,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
       await prisma.user.update({
         where: { id: user.id },
-        data: { twoFactorEnabled: false, twoFactorSecret: null, twoFactorBackupCodes: [] },
+        data: { twoFactorEnabled: false, twoFactorSecret: null, twoFactorBackupCodes: toJsonText([]) },
       });
       await recordAudit({ userId: user.id, action: AuditAction.USER_2FA_DISABLED, ...auditRequestContext(request) });
       return reply.send({ ok: true });

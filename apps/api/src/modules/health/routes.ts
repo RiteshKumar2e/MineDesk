@@ -7,8 +7,9 @@ import { redis } from '../../lib/redis.js';
  *
  * /health   - is the process up? Used by the load balancer to decide whether to
  *             restart the container. Never touches a dependency.
- * /ready    - can it actually serve traffic? Checks Postgres and Redis, and is
- *             what a deployment waits on before shifting traffic over.
+ * /ready    - can it actually serve traffic? Checks the database (SQLite/
+ *             libSQL) and Redis, and is what a deployment waits on before
+ *             shifting traffic over.
  *
  * Neither reveals versions, hostnames or configuration.
  */

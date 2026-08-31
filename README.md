@@ -381,8 +381,10 @@ see [What's implemented in Phase 6](#whats-implemented-in-phase-6).
 ## Prerequisites
 
 - Node.js >= 20.11 (developed against Node 22)
-- Docker Desktop (for PostgreSQL, Redis and coturn) - or your own local
-  instances of Postgres 16+ and Redis 7+
+- Docker Desktop for Redis and coturn - or your own local Redis 7+ (see
+  RUN.md for a no-Docker WSL2/Memurai path). The database is SQLite/libSQL
+  (Turso), which needs nothing installed for local development - it's just a
+  file.
 - npm 10+ (workspaces)
 
 ## Setup
@@ -399,19 +401,23 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 # they must all be different values.
 ```
 
-Start Postgres and Redis (coturn is optional for Phase 1 - nothing needs TURN
-yet):
+Start Redis (coturn is optional for Phase 1 - nothing needs TURN yet):
 
 ```bash
-docker compose up -d postgres redis
+docker compose up -d redis
 ```
 
 Apply the database schema:
 
 ```bash
-npm run db:migrate -w @minedesk/api    # creates and applies the initial migration
-npm run db:generate -w @minedesk/api   # regenerates the Prisma client (also runs on build)
+cd apps/api
+npx prisma db push    # creates/updates apps/api/prisma/dev.db from schema.prisma
+cd ../..
 ```
+
+(`apps/api/prisma/.env` supplies `DATABASE_URL` for this command
+specifically - see its comment, and `apps/api/src/lib/prisma.ts`'s, for why
+it's a separate file from the root `.env` and not a mistake to merge.)
 
 Optional: seed a demo account (`demo@minedesk.local` / `CorrectHorseBattery9`,
 pre-verified so you can skip the email step):
@@ -453,17 +459,16 @@ absolute paths, UNC paths, null bytes, Windows reserved device names,
 trailing-dot/space tricks) - the part of the security surface that is pure
 logic and does not need infrastructure.
 
-### 3. Integration tests (need Postgres + Redis)
+### 3. Integration tests (need the database + Redis)
 
 These hit a real database rather than mocking Prisma, because the things
 worth testing - unique constraints, password hashing, refresh-token rotation,
 transactional revocation - are exactly what a mock gets wrong silently.
 
 ```bash
-docker compose up -d postgres redis
+docker compose up -d redis
 cd apps/api
-cp ../../.env .env               # or otherwise ensure DATABASE_URL/REDIS_URL are set
-npm run db:migrate                # first time only
+npx prisma db push                # first time only - creates apps/api/prisma/dev.db
 npm test                          # runs auth.test.ts + devices.test.ts + paths.test.ts
 ```
 
@@ -593,8 +598,12 @@ Not exercised in this phase, but the pieces are already shaped for it:
   Dockerfile
 - **API**: the provided Dockerfile to any container host (Fly.io, Render,
   ECS, Azure Container Apps); it's stateless, so it scales horizontally behind
-  a load balancer as soon as Postgres/Redis are reachable
-- **Database**: managed PostgreSQL (RDS, Neon, Supabase, Cloud SQL...)
+  a load balancer as soon as the database/Redis are reachable
+- **Database**: a hosted Turso (libSQL) database - `turso db create`, then set
+  `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN`. Schema
+  changes go through the `turso` CLI (`turso db shell <name> < migration.sql`),
+  not `prisma db push`/`migrate`, since Prisma's schema engine only speaks to
+  a local file directly, not the remote libSQL protocol.
 - **Redis**: managed Redis (Upstash, ElastiCache...) - required for presence
   and cross-replica signaling once you run more than one API instance
 - **TURN**: a dedicated coturn instance with a public IP; `TURN_STATIC_SECRET`
