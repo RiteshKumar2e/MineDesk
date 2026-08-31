@@ -4,32 +4,21 @@
   "version": "0.1.0",
   "description": "MineDesk - authorized remote desktop and remote support platform",
   "type": "module",
-  "workspaces": [
-    "packages/*",
-    "apps/api",
-    "apps/web"
-  ],
   "engines": {
     "node": ">=20.11"
   },
   "scripts": {
-    "build:packages": "npm run build -w @minedesk/types -w @minedesk/protocol -w @minedesk/shared",
-    "build": "npm run build:packages && npm run build -w @minedesk/api && npm run build -w @minedesk/web",
-    "dev": "npm run build:packages && concurrently -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "npm run dev -w @minedesk/api",
-    "dev:web": "npm run dev -w @minedesk/web",
-    "db:migrate": "npm run db:migrate -w @minedesk/api",
-    "db:generate": "npm run db:generate -w @minedesk/api",
-    "db:studio": "npm run db:studio -w @minedesk/api",
-    "test": "npm run test -w @minedesk/api && npm run test -w @minedesk/web",
-    "test:api": "npm run test -w @minedesk/api",
-    "test:web": "npm run test -w @minedesk/web",
-    "lint": "tsc -b --pretty packages/types packages/protocol packages/shared apps/api",
+    "dev": "concurrently -n backend,frontend -c blue,magenta \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:backend": "npm --prefix backend run build",
+    "build:frontend": "npm --prefix frontend run build",
+    "test:backend": "npm --prefix backend run test",
+    "test:frontend": "npm --prefix frontend run test",
     "infra:up": "docker compose up -d redis coturn",
     "infra:down": "docker compose down"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0",
-    "typescript": "^5.7.2"
+    "concurrently": "^9.1.0"
   }
 }

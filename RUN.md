@@ -4,33 +4,46 @@ This is a from-scratch, step-by-step runbook for *this* machine's actual
 state, not a generic guide. It assumes you're on Windows, in
 `C:\Users\anmol\OneDrive\Desktop\MineDesk`, using PowerShell.
 
+**Repo layout**: just two top-level app folders, each a fully standalone
+npm project with its own `package.json`/`node_modules` - no npm workspaces,
+no shared packages to build first.
+- `frontend/` - the React dashboard (Vite).
+- `backend/` - the Fastify API, **and** `backend/agent/` inside it - the
+  Rust remote-desktop agent that actually gets controlled. It lives here
+  rather than as a third top-level folder because the API is what builds,
+  serves, and downloads it (see `AGENT_BINARY_PATH` in `backend/.env`).
+
 Two things are already true on this machine and don't need setup:
 
 - Node.js v22.12.0 and npm 11.5.2 are installed (repo needs Node >= 20.11).
-- The Rust toolchain needed to build `apps/agent` is installed and proven
+- The Rust toolchain needed to build `backend/agent` is installed and proven
   working (see [Building and running the Rust agent](#building-and-running-the-rust-agent)).
 
 The database is SQLite/libSQL (Turso), not Postgres - it's a plain file
-(`apps/api/db/dev.db`), already created and seeded on this machine, so
+(`backend/db/dev.db`), already created and seeded on this machine, so
 **there is nothing to install or run for it**. There is no ORM either: the
-API talks to it directly through `@libsql/client` (`apps/api/src/lib/db.ts`),
-and the schema lives as plain SQL in `apps/api/db/schema.sql` - no migration
-engine, no generated client, no `prisma generate` step. Docker is only needed for
-Redis (and optionally coturn); it isn't currently usable from a terminal on
-this machine (no `docker` command on PATH, no working Docker Desktop install
-detected) - see step 2.
+API talks to it directly through `@libsql/client` (`backend/src/lib/db.ts`),
+and the schema lives as plain SQL in `backend/db/schema.sql` - no migration
+engine, no generated client. Docker is only needed for Redis (and optionally
+coturn); it isn't currently usable from a terminal on this machine (no
+`docker` command on PATH, no working Docker Desktop install detected) - see
+step 2.
 
 ## 1. Install dependencies
 
+Each app installs its own dependencies independently:
+
 ```powershell
 cd C:\Users\anmol\OneDrive\Desktop\MineDesk
-npm install
+npm install               # just the root's `concurrently` helper
+npm --prefix backend install
+npm --prefix frontend install
 ```
 
 ## 2. Get Redis running
 
 The API needs Redis reachable at `redis://localhost:6379` (presence,
-pub/sub, rate limiting - see `apps/api/src/lib/redis.ts`). It is **not**
+pub/sub, rate limiting - see `backend/src/lib/redis.ts`). It is **not**
 running on this machine right now (confirmed: no `docker` CLI, and WSL2's
 Ubuntu distro has no `redis-server` installed either). Pick one:
 
@@ -93,28 +106,33 @@ direct P2P or STUN-only connects fine without it.
 
 ## 3. Configure secrets
 
-`.env` already exists in the repo root with a working local `DATABASE_URL`
-(`file:./db/dev.db`, resolved relative to `apps/api` since that's the API
-process's working directory), but the JWT/encryption secrets are still the
-example placeholders - **do not run this past your own machine with
-placeholder secrets.** Generate real ones:
+Each app has its own `.env`, already created on this machine:
 
-```powershell
-node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-```
-
-Run that three times and paste the results into `.env` for `JWT_SECRET`,
-`AGENT_JWT_SECRET`, and `ENCRYPTION_KEY` (all three must be different
-values).
+- `backend/.env` - has a working local `DATABASE_URL` (`file:./db/dev.db`,
+  resolved relative to `backend/` since that's the API process's working
+  directory), but the JWT/encryption secrets are still example placeholders
+  in `backend/.env.example` if you ever regenerate it - the real `.env`
+  already has fresh random values. **Never commit `backend/.env`** or run a
+  deployment past your own machine with placeholder secrets. Generate real
+  ones with:
+  ```powershell
+  node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+  ```
+  (needed for `JWT_SECRET`, `AGENT_JWT_SECRET`, `ENCRYPTION_KEY` - all three
+  must be different values).
+- `frontend/.env` - just `VITE_API_URL`/`VITE_WS_URL`, already pointed at
+  `http://127.0.0.1:4000`/`ws://127.0.0.1:4000` (not `localhost` -
+  Node on this machine resolves `localhost` to the IPv6 loopback `::1`
+  first, which the API doesn't listen on; `127.0.0.1` sidesteps that).
 
 ## 4. The database schema
 
-Already created and seeded on this machine - `apps/api/db/dev.db` exists
+Already created and seeded on this machine - `backend/db/dev.db` exists
 with the current schema and a demo account. Skip straight to step 5 unless
 you've reset something. To (re)do it yourself:
 
 ```powershell
-cd apps\api
+cd backend
 Get-Content db\schema.sql | sqlite3 db\dev.db   # (re)creates every table from scratch
 npm run db:seed                                  # optional: seeds the demo account below
 ```
@@ -128,8 +146,8 @@ Turning this into a real hosted Turso database later (multi-device access,
 production) means creating a database with the `turso` CLI, applying
 `db/schema.sql` to it (`turso db shell <name> < db/schema.sql`), then setting
 `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN=...` in
-`.env` - same schema file either way, just pointed at a different database.
-Not needed for local development.
+`backend/.env` - same schema file either way, just pointed at a different
+database. Not needed for local development.
 
 ## 5. Run the API and web app
 
@@ -137,8 +155,10 @@ Not needed for local development.
 npm run dev
 ```
 
-This builds `packages/*` first, then runs the API and web dev servers
-together (labeled `api`/`web` in the log output).
+This runs both dev servers together from the repo root (labeled
+`backend`/`frontend` in the log output) - each is just `npm --prefix
+<folder> run dev` under the hood, so running them separately in two
+terminals works exactly the same way.
 
 - API: http://localhost:4000 (check http://localhost:4000/health)
 - Web: http://localhost:5173
@@ -159,17 +179,17 @@ at http://localhost:5173/connect
 - no MineDesk account needed, matching AnyDesk's own "just type an address"
 front door. It works via a real but disposable account minted silently
 behind that page (see `createGuestUser`'s comment in
-`apps/api/src/modules/auth/service.ts`), so the existing owner/live-consent/
+`backend/src/modules/auth/service.ts`), so the existing owner/live-consent/
 unattended-password rules apply exactly as they do for a signed-in stranger -
 the person at the device still has to approve the request unless a valid
 unattended password was given.
 
 ## Building and running the Rust agent
 
-The agent (`apps/agent`) is what actually gets controlled - it captures the
-screen, injects input, and streams media. It only makes sense to run it on
-a machine you intend to remote into (can be this same machine, for a local
-end-to-end test).
+The agent (`backend/agent`) is what actually gets controlled - it captures
+the screen, injects input, and streams media. It only makes sense to run it
+on a machine you intend to remote into (can be this same machine, for a
+local end-to-end test).
 
 **Prerequisites**, already satisfied on this machine:
 
@@ -177,15 +197,15 @@ end-to-end test).
 - VS Build Tools with the C++ workload (linker + Windows SDK)
 - CMake (needed to build `audiopus_sys`'s vendored Opus; the required
   `CMAKE_POLICY_VERSION_MINIMUM` setting is already committed in
-  `apps/agent/.cargo/config.toml`, nothing to do)
+  `backend/agent/.cargo/config.toml`, nothing to do)
 
 **The one thing you need to know**: `cargo` is not on PATH in a fresh
 terminal on this machine (rustup's shims were never fully set up). Use
-`scripts\rust-env.ps1`, already in this repo, to fix that for the current
+`backend/agent/rust-env.ps1`, already in this repo, to fix that for the current
 terminal session:
 
 ```powershell
-. C:\Users\anmol\OneDrive\Desktop\MineDesk\scripts\rust-env.ps1
+. C:/Users/anmol/OneDrive/Desktop/MineDesk/backend/agent/rust-env.ps1
 ```
 
 (the leading `. ` matters - it "dot-sources" the script into your current
@@ -199,8 +219,8 @@ once - if that successfully creates real `cargo.exe`/`rustc.exe` shims in
 Build it:
 
 ```powershell
-. C:\Users\anmol\OneDrive\Desktop\MineDesk\scripts\rust-env.ps1
-cd C:\Users\anmol\OneDrive\Desktop\MineDesk\apps\agent
+. C:/Users/anmol/OneDrive/Desktop/MineDesk/backend/agent/rust-env.ps1
+cd C:\Users\anmol\OneDrive\Desktop\MineDesk\backend\agent
 cargo build --release
 ```
 
@@ -228,17 +248,21 @@ the device should now show **online** on the dashboard - click it and
     all depend on Redis, so device status and remote sessions won't work
     without it.
 - **API fails at startup with a `DATABASE_URL` or SQLite error** - confirm
-  `.env`'s `DATABASE_URL=file:./db/dev.db` and that `apps/api/db/dev.db`
-  actually exists (see step 4 to recreate it). `/ready`
+  `backend/.env`'s `DATABASE_URL=file:./db/dev.db` and that
+  `backend/db/dev.db` actually exists (see step 4 to recreate it). `/ready`
   (http://localhost:4000/ready) reports `database` and `redis` health
   separately if you need to narrow down which one is the problem.
 - **"no such table" on a fresh database** - `db/schema.sql` was never applied.
   Rerun the `sqlite3`/`turso db shell` command from step 4 against the file
   `DATABASE_URL` actually points at.
+- **Frontend proxy logs `ECONNREFUSED ::1:4000`** - the API isn't reachable
+  over IPv6 (it only listens on IPv4). Make sure `frontend/.env` uses
+  `127.0.0.1`, not `localhost`, for `VITE_API_URL`/`VITE_WS_URL` (already
+  the case on this machine).
 - **`cargo` / `rustc` not recognized** - you opened a new terminal and
-  didn't re-run `. scripts\rust-env.ps1` (see above).
+  didn't re-run `. backend/agent/rust-env.ps1` (see above).
 - **`cargo build` fails on `audiopus_sys` with a CMake error** - confirm
-  `apps\agent\.cargo\config.toml` exists and CMake is on PATH
+  `backend\agent\.cargo\config.toml` exists and CMake is on PATH
   (`cmake --version`).
 - **Agent enroll fails with a network error** - double check `--api-url`
   matches where the API is actually listening (`http://localhost:4000` in

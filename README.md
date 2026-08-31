@@ -26,7 +26,7 @@ phase's agent-side additions too.
 ## Architecture at a glance
 
 ```
-Browser (React) --HTTPS--> API (Fastify) --> PostgreSQL (source of truth)
+Browser (React) --HTTPS--> API (Fastify) --> SQLite/Turso (source of truth)
        |                        |
        |WSS /signal             +--> Redis (presence, pub/sub, rate limits)
        v                        |
@@ -35,7 +35,7 @@ Remote Agent (Phase 2+) <-------+
         \--- WebRTC media ----/   (peer-to-peer, TURN relay as fallback)
 ```
 
-- **Control plane** (`apps/api`, HTTPS/JSON): identity, devices, permissions,
+- **Control plane** (`backend`, HTTPS/JSON): identity, devices, permissions,
   sessions, audit. Stateless - any replica can serve any request.
 - **Signaling plane** (`/signal`, WebSocket): a thin authenticated router for
   SDP/ICE/session-control frames. It never touches media.
@@ -49,21 +49,27 @@ security boundaries, and the camera/microphone consent flow).
 
 ## Project structure
 
+Two standalone, independently deployable projects - no npm workspaces, no
+shared package to build first. `frontend/` and `backend/` each vendor their
+own copy of the small amount of code both sides need (types, wire protocol,
+id/permission helpers) under `src/vendor/`, kept in sync by hand.
+
 ```
-apps/
-  api/       Fastify + TypeScript backend (auth, devices, signaling, audit)
-  web/       React + Vite + Tailwind dashboard
-  agent/     Windows Remote Agent (Phase 2+, not yet implemented)
-packages/
-  types/     Shared domain types (no runtime dependencies)
-  protocol/  Wire protocol: error codes, signaling schemas (zod), audit actions
-  shared/    Pure helpers: id generation, permission defaults, path validation
-infrastructure/
-  docker/    Dockerfiles for api and web
-  coturn/    TURN server config
-  nginx/     Static web config + an optional single-host reverse-proxy config
+frontend/
+  src/         React + Vite + Tailwind dashboard
+  src/vendor/  types, protocol, shared - vendored copy (see backend/'s)
+  Dockerfile   standalone nginx static build (optional; Vercel is primary)
+  vercel.json  SPA rewrite rule
+backend/
+  src/              Fastify + TypeScript backend (auth, devices, signaling, audit)
+  src/vendor/       types, protocol, shared - vendored copy (see frontend/'s)
+  db/               schema.sql (hand-written, no ORM/migration engine) + dev.db
+  agent/            Windows Remote Agent (Rust) - built and served by this API
+  agent/rust-env.ps1  dev-machine Rust/MSVC toolchain setup (see RUN.md)
+  infrastructure/   coturn (TURN server) config, optional single-host nginx config
+  Dockerfile        standalone image (Render/Fly.io)
+  fly.toml          Fly.io config
 docker-compose.yml
-.env.example
 ```
 
 ## What's implemented in Phase 1
@@ -83,7 +89,8 @@ docker-compose.yml
 
 **Device registration**
 - Owner creates a device in the dashboard → gets a one-time enrollment code
-- Agent exchanges the code for a device-scoped credential (`RMT-XXXX-XXXX`)
+- Agent exchanges the code for a device-scoped credential and a 9-digit
+  device id (AnyDesk-style, e.g. `261 967 268`)
 - Device-scoped JWTs, separate signing key from user tokens
 - Presence via Redis TTL keys refreshed by heartbeat (crash-safe: a dead
   replica cannot leave a device stuck "online")
@@ -112,11 +119,11 @@ docker-compose.yml
   when the video is letterboxed (`object-fit: contain`)
 - Sends mouse/keyboard/wheel input over two WebRTC DataChannels - an
   unreliable/unordered one for mouse-move, reliable/ordered for everything
-  else - using the `@minedesk/protocol` input schema shared with the agent
+  else - using the vendored protocol input schema shared with the agent
 - Disconnect button, a Ctrl+Alt+Del button, and status states for connecting/
   waiting-for-approval/active/reconnecting/denied/ended/failed
 
-**Remote Agent** (`apps/agent`, Rust, Windows) - see
+**Remote Agent** (`backend/agent`, Rust, Windows) - see
 [Phase 2 status](#phase-2-status) for how much of this is compiler-verified:
 - `minedesk-agent enroll --code ...` exchanges a one-time code for a device
   credential, stored at `%ProgramData%\MineDesk\agent.toml`
@@ -148,7 +155,7 @@ after a network interruption.
 
 **Clipboard sync** - permission-gated like every other capability, carried
 over the same reliable DataChannel as keyboard/mouse (see
-`packages/protocol/src/datachannel.ts`'s `ClipboardText` message):
+`backend/src/vendor/protocol/datachannel.ts`'s `ClipboardText` message):
 - Controller to remote: Ctrl+V over the remote view sends the pasted text
   directly (the native `paste` event, no permission prompt); a "Send
   clipboard" button covers the case where a bare paste event doesn't fire
@@ -166,7 +173,7 @@ connection as the video track; the browser plays it through the existing
 
 **File transfer** - a dedicated `md-files` DataChannel, one transfer at a
 time per session (see the protocol doc comment in
-`packages/protocol/src/filetransfer.ts` for why):
+`backend/src/vendor/protocol/filetransfer.ts` for why):
 - Owner configures one or more shared folders per device (new UI on the
   device detail page); the file manager panel in `/remote/:sessionId`
   browses them, with upload/download/rename/delete/new-folder gated
@@ -176,7 +183,7 @@ time per session (see the protocol doc comment in
   doesn't get buffered wholesale in browser memory before the channel can
   actually send it
 - Every path is validated on the agent by a Rust port of
-  `packages/shared/src/paths.ts`'s traversal guard (`apps/agent/src/paths.rs`)
+  `backend/src/vendor/shared/paths.ts`'s traversal guard (`backend/agent/src/paths.rs`)
   before any filesystem call - the same rule set, hand-mirrored the same way
   the wire protocol is
 
@@ -215,7 +222,7 @@ whoever is at the remote machine:
 **Not yet implemented**: a native tray/notification-window indicator (console
 output stands in, as documented since Phase 2), device selection when more
 than one camera/microphone exists, and actually removing the WebRTC track on
-stop rather than just halting capture - see `apps/agent/README.md`'s Known
+stop rather than just halting capture - see `backend/agent/README.md`'s Known
 Limitations for the reasoning on that last one.
 
 ## What's implemented in Phase 5
@@ -278,7 +285,7 @@ the two concrete, code-level items from this phase's original scope.
 TURN-in-production, horizontal scaling and monitoring/deployment were mostly
 already true by construction (stateless API, Redis-backed presence and
 rate limiting, ephemeral TURN credentials since Phase 1) rather than needing
-new code; see [Deployment](#deployment-forward-looking) for what's left
+new code; see [Deployment](#deployment) for what's left
 there, which is infrastructure rather than application code.
 
 **The invite race is fixed.** A new server-only signaling message,
@@ -294,7 +301,7 @@ race structurally impossible rather than merely unlikely: the agent cannot
 publish to a channel it hasn't confirmed has a listener on.
 
 **Reconnection.** A dropped signaling WebSocket no longer ends the agent
-process or any session in progress - `apps/agent/README.md`'s Known
+process or any session in progress - `backend/agent/README.md`'s Known
 Limitations previously called this out explicitly; see that file for what's
 still not covered (a session still awaiting approval when signaling drops
 does not resume automatically). WebRTC media runs over its own sockets
@@ -357,7 +364,7 @@ inbound handler. Both `cargo check` and `cargo build --release` now succeed
 with exit code 0:
 
 ```bash
-cd apps/agent
+cd backend/agent
 cargo build --release
 ```
 
@@ -367,7 +374,7 @@ enrollment present. **What this verification does not cover**: actual
 runtime behavior against a live server and real hardware - real screen
 capture from a GPU, a real WebRTC negotiation against the signaling hub, and
 real camera/microphone devices have not been exercised, only compilation,
-linking, and CLI-level smoke tests. See `apps/agent/README.md` for the full
+linking, and CLI-level smoke tests. See `backend/agent/README.md` for the full
 list of genuinely-remaining gaps (Windows service mode - needed for true
 unattended access when nobody is logged in, and for Ctrl+Alt+Del - tray/
 window UI, multi-monitor support, and others), none of which are
@@ -385,17 +392,21 @@ see [What's implemented in Phase 6](#whats-implemented-in-phase-6).
   RUN.md for a no-Docker WSL2/Memurai path). The database is SQLite/libSQL
   (Turso), which needs nothing installed for local development - it's just a
   file.
-- npm 10+ (workspaces)
+- npm 10+ - no workspaces needed; `frontend/` and `backend/` are two
+  independent projects, each with its own `package.json`/`node_modules`.
 
 ## Setup
 
 ```bash
 git clone <this-repo>
 cd MineDesk
-npm install
+npm install                    # just the root's `concurrently` dev helper
+npm --prefix backend install
+npm --prefix frontend install
 
-cp .env.example .env
-# Generate real secrets and paste them into .env:
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env
+# Generate real secrets and paste them into backend/.env:
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 # Run that three times for JWT_SECRET, AGENT_JWT_SECRET, ENCRYPTION_KEY -
 # they must all be different values.
@@ -408,19 +419,19 @@ docker compose up -d redis
 ```
 
 Apply the database schema (plain SQL, no ORM or migration engine - see
-`apps/api/db/schema.sql`):
+`backend/db/schema.sql`):
 
 ```bash
-cd apps/api
+cd backend
 sqlite3 db/dev.db < db/schema.sql   # or: npx --yes @turso/cli db shell file:db/dev.db < db/schema.sql
-cd ../..
+cd ..
 ```
 
 Optional: seed a demo account (`demo@minedesk.local` / `CorrectHorseBattery9`,
 pre-verified so you can skip the email step):
 
 ```bash
-npm run db:seed -w @minedesk/api
+npm --prefix backend run db:seed
 ```
 
 Run both apps in dev mode:
@@ -437,17 +448,16 @@ npm run dev
 ### 1. Type-check and build everything
 
 ```bash
-npm run build:packages   # types -> protocol -> shared, in dependency order
-npm run build            # api + web
+npm --prefix backend run build
+npm --prefix frontend run build
 ```
 
-Both apps build clean with zero `npm audit` findings across the whole
-workspace as of this commit.
+Both apps build clean with zero `npm audit` findings.
 
 ### 2. Unit tests (no database required)
 
 ```bash
-cd apps/api
+cd backend
 npx vitest run tests/paths.test.ts
 ```
 
@@ -465,8 +475,8 @@ silently.
 
 ```bash
 docker compose up -d redis
-cd apps/api
-sqlite3 db/dev.db < db/schema.sql   # first time only - creates apps/api/db/dev.db
+cd backend
+sqlite3 db/dev.db < db/schema.sql   # first time only - creates backend/db/dev.db
 npm test                            # runs auth.test.ts + devices.test.ts + paths.test.ts
 ```
 
@@ -499,7 +509,7 @@ test:watch` while iterating.
    backup codes
 4. Log out, log back in → you're prompted for the 6-digit code
 5. Devices → **Add device** → name it → copy the `minedesk-agent enroll
-   --code ENR-...` command. If you've built the agent (`cd apps/agent &&
+   --code ENR-...` command. If you've built the agent (`cd backend/agent &&
    cargo build --release`), run that command for real against your local API
    (`--api-url http://localhost:4000`) and the device should flip to online in
    the dashboard within a few seconds. Otherwise this step just confirms the
@@ -530,7 +540,7 @@ test:watch` while iterating.
    same `/remote/:sessionId` flow as step 7, without owning the device.
    Trying five wrong passwords in a row should lock out with
    `UNATTENDED_PASSWORD_INVALID` even on a since-corrected sixth attempt
-   (see `apps/api/tests/sessions.test.ts` for the same behavior under test).
+   (see `backend/tests/sessions.test.ts` for the same behavior under test).
    Back in the first account, the device's **Access history** card should
    show the second account's session, and a **Connected via access
    password** card should list the second account by name.
@@ -582,19 +592,20 @@ and the frame parser are all wired correctly independent of the agent.
   race, reconnection, ICE restart) are built; see
   [What's implemented in Phase 6](#whats-implemented-in-phase-6). Actually
   standing up TURN/monitoring infrastructure for a real deployment is still
-  ahead, as it always was - see [Deployment](#deployment-forward-looking).
+  ahead, as it always was - see [Deployment](#deployment).
 
-## Deployment (forward-looking)
+## Deployment
 
-Not exercised in this phase, but the pieces are already shaped for it:
+See DEPLOY.md for the full step-by-step walkthrough (Turso, Upstash, Render/
+Fly.io, Vercel). Summary of the pieces:
 
-- **Web**: static build (`apps/web/dist`) to Vercel, or the provided nginx
+- **Web**: static build (`frontend/dist`) to Vercel, or the provided nginx
   Dockerfile
 - **API**: the provided Dockerfile to any container host (Fly.io, Render,
   ECS, Azure Container Apps); it's stateless, so it scales horizontally behind
   a load balancer as soon as the database/Redis are reachable
 - **Database**: a hosted Turso (libSQL) database - `turso db create`, apply
-  `apps/api/db/schema.sql` (`turso db shell <name> < apps/api/db/schema.sql`),
+  `backend/db/schema.sql` (`turso db shell <name> < backend/db/schema.sql`),
   then set `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN`.
   There's no ORM or migration engine in the way - it's the same plain SQL
   file either way, just applied to a different database.

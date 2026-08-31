@@ -35,13 +35,12 @@ services:
       - "3478:3478/tcp"
       - "49160-49200:49160-49200/udp"
     volumes:
-      - ./infrastructure/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./backend/infrastructure/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
     command: ["-c", "/etc/coturn/turnserver.conf"]
 
   api:
     build:
-      context: .
-      dockerfile: infrastructure/docker/api.Dockerfile
+      context: ./backend
     container_name: minedesk-api
     restart: unless-stopped
     depends_on:
@@ -69,15 +68,14 @@ services:
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET}
       TURN_REALM: ${TURN_REALM:-minedesk.local}
     volumes:
-      - api-db-data:/app/apps/api/db/data
+      - api-db-data:/app/db/data
     ports:
       - "4000:4000"
     profiles: ["full"]
 
   web:
     build:
-      context: .
-      dockerfile: infrastructure/docker/web.Dockerfile
+      context: ./frontend
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
         VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:4000}

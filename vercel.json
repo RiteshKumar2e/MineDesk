@@ -1,6 +1,0 @@
-{
-  "buildCommand": "npm run build:packages && npm run build -w @minedesk/web",
-  "outputDirectory": "apps/web/dist",
-  "installCommand": "npm install",
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
-}
