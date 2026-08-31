@@ -41,6 +41,7 @@ export function toPublicDevice(device: DeviceWithRelations, online: boolean): Pu
     lastSeenAt: device.lastSeenAt?.toISOString() ?? null,
     unattendedAccessEnabled: device.unattendedAccessEnabled,
     hasUnattendedPassword: Boolean(device.unattendedPasswordHash),
+    allowIncomingRequests: device.allowIncomingRequests,
     enrolledAt: device.enrolledAt?.toISOString() ?? null,
     createdAt: device.createdAt.toISOString(),
     permissions: permissionsOf(device.permissions),
@@ -277,6 +278,37 @@ export async function setUnattendedAccess(
       ipAddress: meta.ip,
     });
   }
+
+  return getOwnedDevice(userId, deviceRowId);
+}
+
+/**
+ * Turn the AnyDesk-style "anyone with my ID may ask" path on or off.
+ *
+ * Unlike unattended access there is no password here, because nothing is
+ * granted by flipping this: it only decides whether a stranger's request is
+ * allowed to reach the machine as a prompt at all. Turning it off is how an
+ * owner stops unsolicited prompts entirely.
+ */
+export async function setIncomingRequests(
+  userId: string,
+  deviceRowId: string,
+  enabled: boolean,
+  meta: { ip: string },
+): Promise<DeviceWithRelations> {
+  const device = await getOwnedDevice(userId, deviceRowId);
+
+  await prisma.device.update({
+    where: { id: device.id },
+    data: { allowIncomingRequests: enabled },
+  });
+
+  await recordAudit({
+    userId,
+    deviceId: device.id,
+    action: enabled ? AuditAction.DEVICE_INCOMING_REQUESTS_ENABLED : AuditAction.DEVICE_INCOMING_REQUESTS_DISABLED,
+    ipAddress: meta.ip,
+  });
 
   return getOwnedDevice(userId, deviceRowId);
 }

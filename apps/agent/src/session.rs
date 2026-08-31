@@ -525,18 +525,32 @@ pub async fn start(
 }
 
 /// Captures the primary display and pushes H.264 samples into the video
-/// track at a fixed cadence. 15 fps is a deliberately conservative default
-/// for a software encoder on a background thread; see `apps/agent/README.md`
-/// for the hardware-encoder upgrade path this is designed to be swapped for
-/// later without touching anything outside this function.
+/// track, up to `TARGET_FPS`.
+///
+/// The cadence is a *ceiling*, not a metronome: `next_frame` blocks until the
+/// desktop actually changes, so a still screen costs nothing and a busy one
+/// runs as fast as capture-plus-encode allows, up to the cap. The old loop
+/// slept out the remainder of a fixed 66 ms budget after every frame, which
+/// held even a fast machine to 15 fps; the sleep below only runs when a frame
+/// genuinely completed ahead of schedule, which is what keeps the encoder's
+/// rate control honest without throwing away headroom.
+///
+/// See `apps/agent/README.md` for the hardware-encoder upgrade path this is
+/// designed to be swapped for later without touching anything outside this
+/// function.
 fn spawn_video_loop(
     mut capture: ScreenCapture,
     video_track: Arc<TrackLocalStaticSample>,
     session_id: String,
     stop: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
-    const TARGET_FPS: u32 = 15;
+    // Must match `max_frame_rate` in video.rs's encoder config.
+    const TARGET_FPS: u32 = 30;
     let frame_duration = Duration::from_millis(1000 / TARGET_FPS as u64);
+    // How long to wait for the desktop to change before going round again.
+    // Deliberately longer than one frame: a still screen should block here
+    // rather than spin, and a change wakes this immediately regardless.
+    const CAPTURE_WAIT_MS: u32 = 500;
 
     tokio::task::spawn_blocking(move || {
         let (width, height) = capture.dimensions();
@@ -553,7 +567,7 @@ fn spawn_video_loop(
         while !stop.load(Ordering::Relaxed) {
             let frame_start = std::time::Instant::now();
 
-            match capture.next_frame(frame_duration.as_millis() as u32) {
+            match capture.next_frame(CAPTURE_WAIT_MS) {
                 Ok(Some(frame)) => match encoder.encode_bgra(&frame) {
                     Ok(nal_bytes) if !nal_bytes.is_empty() => {
                         let track = video_track.clone();

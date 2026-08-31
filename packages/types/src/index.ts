@@ -71,6 +71,8 @@ export interface PublicDevice {
   lastSeenAt: string | null;
   unattendedAccessEnabled: boolean;
   hasUnattendedPassword: boolean;
+  /** Whether anyone who knows this device's ID may ask to connect, subject to live approval at the machine. */
+  allowIncomingRequests: boolean;
   enrolledAt: string | null;
   createdAt: string;
   permissions: PermissionSet;

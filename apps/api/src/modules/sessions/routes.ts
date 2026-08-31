@@ -85,44 +85,61 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
 
     const isOwner = device.userId === request.user!.id;
 
-    if (!isOwner) {
-      // Same error for "no such device" and "not authorized" up to this
-      // point is not needed here - the caller already knows this device
-      // exists (they typed a valid ID) - but the specific reason for
-      // refusal below still must not distinguish "wrong password" from
-      // "unattended access is off" any more than necessary, so both are
-      // UNATTENDED_PASSWORD_INVALID.
-      if (!device.unattendedAccessEnabled || !device.unattendedPasswordHash) {
-        throw new AppError(ErrorCode.UNATTENDED_ACCESS_DISABLED);
-      }
-      if (await isUnattendedAccessLocked(device.deviceId)) {
-        throw new AppError(ErrorCode.UNATTENDED_PASSWORD_INVALID, {
-          message: 'Too many incorrect attempts. Try again later.',
-        });
-      }
-      const provided = input.unattendedPassword ?? '';
-      const valid = provided.length > 0 && (await verifyPassword(device.unattendedPasswordHash, provided));
+    /**
+     * Whether *this* connection was authorized by the unattended password,
+     * which is the only thing that lets the agent accept without a human at
+     * the remote machine saying yes. Deliberately not `device.
+     * unattendedAccessEnabled`: that is a device setting, and letting a
+     * setting decide would mean a live-consent request silently skipped the
+     * consent prompt just because the owner had also configured a password
+     * for a different purpose.
+     */
+    let viaUnattendedPassword = false;
 
-      if (!valid) {
-        const justLocked = await recordUnattendedFailure(device.deviceId);
+    if (!isOwner) {
+      const providedPassword = input.unattendedPassword ?? '';
+
+      if (providedPassword.length > 0) {
+        // Unattended path: the caller is claiming the owner's password, so
+        // the session may start without anyone approving it at the machine.
+        if (!device.unattendedAccessEnabled || !device.unattendedPasswordHash) {
+          throw new AppError(ErrorCode.UNATTENDED_ACCESS_DISABLED);
+        }
+        if (await isUnattendedAccessLocked(device.deviceId)) {
+          throw new AppError(ErrorCode.UNATTENDED_PASSWORD_INVALID, {
+            message: 'Too many incorrect attempts. Try again later.',
+          });
+        }
+        if (!(await verifyPassword(device.unattendedPasswordHash, providedPassword))) {
+          const justLocked = await recordUnattendedFailure(device.deviceId);
+          await recordAudit({
+            userId: request.user!.id,
+            deviceId: device.id,
+            action: justLocked
+              ? AuditAction.SESSION_UNATTENDED_PASSWORD_LOCKED
+              : AuditAction.SESSION_UNATTENDED_PASSWORD_REJECTED,
+            ipAddress,
+          });
+          throw new AppError(ErrorCode.UNATTENDED_PASSWORD_INVALID);
+        }
+
+        viaUnattendedPassword = true;
+        await clearUnattendedFailures(device.deviceId);
         await recordAudit({
           userId: request.user!.id,
           deviceId: device.id,
-          action: justLocked
-            ? AuditAction.SESSION_UNATTENDED_PASSWORD_LOCKED
-            : AuditAction.SESSION_UNATTENDED_PASSWORD_REJECTED,
+          action: AuditAction.SESSION_UNATTENDED_PASSWORD_ACCEPTED,
           ipAddress,
         });
-        throw new AppError(ErrorCode.UNATTENDED_PASSWORD_INVALID);
+      } else if (!device.allowIncomingRequests) {
+        // Live-consent path, but this device has opted out of receiving
+        // unsolicited requests.
+        throw new AppError(ErrorCode.INCOMING_REQUESTS_DISABLED);
       }
-
-      await clearUnattendedFailures(device.deviceId);
-      await recordAudit({
-        userId: request.user!.id,
-        deviceId: device.id,
-        action: AuditAction.SESSION_UNATTENDED_PASSWORD_ACCEPTED,
-        ipAddress,
-      });
+      // Otherwise: live-consent path. No password is required precisely
+      // because nothing is granted here - the session is created `pending`
+      // and stays that way unless the person at the remote machine accepts
+      // it. Knowing the device ID buys the ability to *ask*, nothing more.
     }
 
     if (!(await isDeviceOnline(device.deviceId))) throw new AppError(ErrorCode.DEVICE_OFFLINE);
@@ -149,7 +166,12 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         userId: request.user!.id,
         deviceId: device.id,
         status: 'pending',
-        unattended: device.unattendedAccessEnabled,
+        // This flag is what tells the agent to accept without prompting, so
+        // it must describe how *this* session was authorized, not what the
+        // device is configured for. An owner reaching their own machine that
+        // they put in unattended mode skips the prompt; anyone else skips it
+        // only by having actually presented the password just above.
+        unattended: isOwner ? device.unattendedAccessEnabled : viaUnattendedPassword,
         grantedCapabilities: toJsonText(capabilities),
         controllerIp: ipAddress,
       },
@@ -162,7 +184,15 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
       action: AuditAction.SESSION_REQUESTED,
       ipAddress,
       userAgent,
-      metadata: { sessionId, unattended: device.unattendedAccessEnabled, viaUnattendedPassword: !isOwner, capabilities },
+      metadata: {
+        sessionId,
+        capabilities,
+        isOwner,
+        viaUnattendedPassword,
+        // How this session will reach the machine: silently, or only if
+        // someone there says yes.
+        requiresLiveConsent: !(isOwner ? device.unattendedAccessEnabled : viaUnattendedPassword),
+      },
     });
 
     // The agent decides accept/deny for itself (see modules/signaling/routes.ts);
@@ -179,7 +209,13 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
         ipHint: ipAddress,
       },
       capabilities,
-      unattended: device.unattendedAccessEnabled,
+      // This is the flag the agent reads to decide "auto-accept" vs "ask the
+      // person sitting here" - so it has to be the authorization this
+      // session actually got, not the device's configuration. Sending
+      // `device.unattendedAccessEnabled` here would mean a stranger's
+      // live-consent request auto-accepted itself on any device whose owner
+      // had ever set an unattended password.
+      unattended: session.unattended,
       // The agent should stop waiting for a human to click Accept after this;
       // the browser gives up around the same time (see /remote/:sessionId).
       expiresAt: Date.now() + 60_000,

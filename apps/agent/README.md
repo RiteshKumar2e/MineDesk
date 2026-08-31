@@ -139,11 +139,25 @@ These are honestly-scoped gaps, not oversights papered over:
   Multi-monitor selection needs enumerating additional outputs and letting
   the controller pick one; `input.rs`'s coordinate mapping would need the
   same extension.
-- **Software H.264 encoding at a fixed 15 fps / default bitrate.** Works, but
-  a busy screen on a slow CPU will show it. A hardware encoder (Media
-  Foundation / NVENC) is a drop-in replacement for `video.rs`'s `H264Encoder`
-  - nothing else needs to change, since `session.rs` only calls
-  `encode_bgra` and expects Annex-B bytes back.
+- **Software H.264 encoding, capped at 30 fps.** Still CPU-bound, so a busy
+  screen on a slow machine will show it, but no longer artificially limited:
+  - The BGRA to I420 conversion in `video.rs` was rewritten from per-pixel
+    `f32` math to fixed-point integers. Measured on a release build at 1080p,
+    that took it from **35.3 ms to 11.6 ms per frame (3.0x)**. The old figure
+    is the interesting one: 35 ms exceeds the entire 33 ms budget for 30 fps
+    *before any H.264 encoding at all*, which is why the loop used to be
+    pinned at 15.
+  - The video loop no longer sleeps out the remainder of a fixed frame
+    budget after every frame. `TARGET_FPS` is a ceiling now, not a metronome:
+    a still screen blocks in `next_frame` and costs nothing, and a busy one
+    runs as fast as capture-plus-encode allows.
+
+  Remaining headroom, in rough order of payoff: a hardware encoder (Media
+  Foundation / NVENC) is a drop-in replacement for `video.rs`'s
+  `H264Encoder` - nothing else needs to change, since `session.rs` only calls
+  `encode_bgra` and expects Annex-B bytes back - and DXGI's dirty-rectangle
+  metadata (`GetFrameDirtyRects`) would let a mostly-static screen skip
+  converting untouched regions entirely.
 - **Reconnection and ICE restart are implemented** (Phase 6): a dropped
   signaling WebSocket triggers `reconnect_signaling` (re-authenticate,
   reconnect, backoff up to 10 attempts / ~5 minutes before giving up), which

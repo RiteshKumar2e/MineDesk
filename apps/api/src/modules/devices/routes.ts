@@ -8,6 +8,7 @@ import { isDeviceOnline } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 import {
   createDeviceSchema,
+  incomingRequestsSchema,
   renameDeviceSchema,
   unattendedAccessSchema,
   updatePermissionsSchema,
@@ -22,6 +23,7 @@ import {
   permissionsOf,
   renameDevice,
   revokeDeviceAccess,
+  setIncomingRequests,
   setUnattendedAccess,
   toPublicDevice,
   updatePermissions,
@@ -134,6 +136,15 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     const input = unattendedAccessSchema.parse(request.body);
     const { ipAddress } = auditRequestContext(request);
     const device = await setUnattendedAccess(request.user!.id, id, input, { ip: ipAddress });
+    return reply.send({ device: toPublicDevice(device, await isDeviceOnline(device.deviceId)) });
+  });
+
+  // ----------------------------------------------------- incoming requests
+  app.put('/:id/incoming-requests', async (request, reply) => {
+    const { id } = paramsSchema.parse(request.params);
+    const input = incomingRequestsSchema.parse(request.body);
+    const { ipAddress } = auditRequestContext(request);
+    const device = await setIncomingRequests(request.user!.id, id, input.enabled, { ip: ipAddress });
     return reply.send({ device: toPublicDevice(device, await isDeviceOnline(device.deviceId)) });
   });
 

@@ -27,6 +27,8 @@ export const AuditAction = {
   DEVICE_UNATTENDED_ENABLED: 'device.unattended_enabled',
   DEVICE_UNATTENDED_DISABLED: 'device.unattended_disabled',
   DEVICE_UNATTENDED_PASSWORD_SET: 'device.unattended_password_set',
+  DEVICE_INCOMING_REQUESTS_ENABLED: 'device.incoming_requests_enabled',
+  DEVICE_INCOMING_REQUESTS_DISABLED: 'device.incoming_requests_disabled',
   DEVICE_ACCESS_REVOKED: 'device.access_revoked',
   DEVICE_ENROLLMENT_CODE_ISSUED: 'device.enrollment_code_issued',
 
@@ -78,6 +80,8 @@ export const AUDIT_LABELS: Record<string, string> = {
   'device.permissions_updated': 'Device permissions updated',
   'device.unattended_enabled': 'Unattended access enabled',
   'device.unattended_disabled': 'Unattended access disabled',
+  'device.incoming_requests_enabled': 'Connection requests allowed',
+  'device.incoming_requests_disabled': 'Connection requests blocked',
   'device.unattended_password_set': 'Unattended access password set',
   'device.access_revoked': 'Device access revoked',
   'device.enrollment_code_issued': 'Enrollment code issued',

@@ -69,9 +69,10 @@ export default function DevicesPage() {
       {showConnect && (
         <div className="card mb-6 p-5">
           <h2 className="mb-1 font-medium">Connect to a device</h2>
-          <p className="mb-3 text-sm text-zinc-500 ">
-            For one of your own devices, use its Connect button below instead. This is for a device someone
-            else shared with you - you'll need its ID and the unattended access password they gave you.
+          <p className="mb-3 text-sm text-zinc-500">
+            Enter the device ID someone shared with you. They will get a prompt on that computer and have to
+            approve the connection before you see anything. The access password is only for connecting to a
+            device that has been left unattended - leave it blank otherwise.
           </p>
           <form onSubmit={handleConnect} className="flex flex-wrap items-end gap-3">
             <div>
@@ -89,13 +90,13 @@ export default function DevicesPage() {
             </div>
             <div>
               <label className="label" htmlFor="connect-password">
-                Access password
+                Access password <span className="font-normal text-zinc-400">(optional)</span>
               </label>
               <input
                 id="connect-password"
                 type="password"
                 className="input"
-                placeholder="Leave blank for your own devices"
+                placeholder="Only for unattended access"
                 value={connectPassword}
                 onChange={(e) => setConnectPassword(e.target.value)}
               />

@@ -133,8 +133,18 @@ model Device {
   enrolledAt      DateTime?
 
   /// Unattended access is opt-in and requires a separate access password.
+  /// This is the "nobody is at the machine" path: it lets a caller who is not
+  /// the owner connect *without* anyone approving it live, so it is gated on
+  /// a password the owner sets explicitly.
   unattendedAccessEnabled  Boolean @default(false)
   unattendedPasswordHash   String?
+
+  /// The AnyDesk-style path: anyone who knows this device's ID may *ask* to
+  /// connect, and the person sitting at the machine approves or refuses each
+  /// request live. No password, because the live approval is the
+  /// authorization. On by default (that is the whole point of a shareable
+  /// device ID); an owner who does not want unsolicited prompts turns it off.
+  allowIncomingRequests    Boolean @default(true)
 
   revokedAt DateTime?
   createdAt DateTime  @default(now())

@@ -12,6 +12,7 @@ import {
   useIssueEnrollmentCode,
   useRenameDevice,
   useRevokeDevice,
+  useSetIncomingRequests,
   useSetUnattendedAccess,
   useUpdatePermissions,
 } from '../lib/deviceQueries';
@@ -36,6 +37,7 @@ export default function DeviceDetailPage() {
   const deleteDevice = useDeleteDevice();
   const updatePermissions = useUpdatePermissions(id ?? '');
   const setUnattended = useSetUnattendedAccess(id ?? '');
+  const setIncomingRequests = useSetIncomingRequests(id ?? '');
   const revokeDevice = useRevokeDevice(id ?? '');
   const issueCode = useIssueEnrollmentCode(id ?? '');
   const createSession = useCreateSession();
@@ -101,6 +103,15 @@ export default function DeviceDetailPage() {
     if (!confirm(`Remove ${device.name}? This cannot be undone.`)) return;
     await deleteDevice.mutateAsync(id);
     navigate('/devices');
+  }
+
+  async function handleIncomingRequestsToggle() {
+    setActionError(null);
+    try {
+      await setIncomingRequests.mutateAsync({ enabled: !device.allowIncomingRequests });
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : 'Could not change that setting.');
+    }
   }
 
   async function handleUnattendedToggle() {
@@ -340,9 +351,29 @@ export default function DeviceDetailPage() {
 
         <div className="space-y-6">
           <section className="card p-5">
+            <h2 className="mb-3 font-medium">Connection requests</h2>
+            <p className="mb-3 text-sm text-zinc-500">
+              Let anyone who has this device's ID ask to connect. Nothing happens until someone at this
+              computer approves the request, so no password is involved. Turn it off to stop unsolicited
+              prompts entirely.
+            </p>
+            <div className="flex items-center justify-between">
+              <span className="text-sm">{device.allowIncomingRequests ? 'Allowed' : 'Blocked'}</span>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => void handleIncomingRequestsToggle()}
+              >
+                {device.allowIncomingRequests ? 'Block' : 'Allow'}
+              </button>
+            </div>
+          </section>
+
+          <section className="card p-5">
             <h2 className="mb-3 font-medium">Unattended access</h2>
-            <p className="mb-3 text-sm text-zinc-500 ">
-              Allow connecting to this device without someone present to approve each session.
+            <p className="mb-3 text-sm text-zinc-500">
+              Allow connecting to this device without someone present to approve each session. This is the
+              only path that needs a password, because nobody will be there to say yes.
             </p>
             <div className="mb-3 flex items-center justify-between">
               <span className="text-sm">

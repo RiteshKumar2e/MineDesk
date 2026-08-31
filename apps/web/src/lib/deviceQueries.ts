@@ -82,6 +82,18 @@ export function useSetUnattendedAccess(id: string) {
   });
 }
 
+export function useSetIncomingRequests(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { enabled: boolean }) =>
+      api.put<{ device: PublicDevice }>(`/api/v1/devices/${id}/incoming-requests`, input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: deviceKeys.all });
+      queryClient.invalidateQueries({ queryKey: deviceKeys.detail(id) });
+    },
+  });
+}
+
 export function useRevokeDevice(id: string) {
   const queryClient = useQueryClient();
   return useMutation({

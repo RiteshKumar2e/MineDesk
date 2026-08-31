@@ -53,6 +53,15 @@ export const unattendedAccessSchema = z
     path: ['password'],
   });
 
+/**
+ * Whether people who know this device's ID may ask to connect, with the
+ * person at the machine approving each request live. No password is involved
+ * either way - see the schema comment on Device.allowIncomingRequests.
+ */
+export const incomingRequestsSchema = z.object({
+  enabled: z.boolean(),
+});
+
 export const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: z.string().uuid().optional(),
