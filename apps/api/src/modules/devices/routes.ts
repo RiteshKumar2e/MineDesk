@@ -2,6 +2,7 @@ import { validatePermissionSet } from '@minedesk/shared';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { AuditAction } from '@minedesk/protocol';
+import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { asStringArray } from '../../lib/json.js';
 import { isDeviceOnline } from '../../lib/presence.js';
@@ -59,7 +60,12 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
       enrollment: {
         code: enrollmentCode,
         expiresAt: expiresAt.toISOString(),
-        command: `minedesk-agent enroll --code ${enrollmentCode}`,
+        // `.\` and an explicit --api-url, not just `minedesk-agent enroll
+        // --code ...`: a browser download lands in Downloads with nothing on
+        // PATH, so the bare command would just fail with "not recognized"
+        // for anyone following this literally, which is exactly the person
+        // who just clicked "Download Agent" and has never used a shell.
+        command: `.\\minedesk-agent.exe enroll --code ${enrollmentCode} --api-url ${env.API_PUBLIC_URL}`,
       },
     });
   });
@@ -126,7 +132,7 @@ export async function deviceRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       code,
       expiresAt: expiresAt.toISOString(),
-      command: `minedesk-agent enroll --code ${code}`,
+      command: `.\\minedesk-agent.exe enroll --code ${code} --api-url ${env.API_PUBLIC_URL}`,
     });
   });
 

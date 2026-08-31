@@ -3,7 +3,7 @@ import type { Capability } from '@minedesk/types';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { StatusDot } from '../components/StatusDot';
-import { ApiError } from '../lib/apiClient';
+import { API_URL, ApiError } from '../lib/apiClient';
 import {
   useDevice,
   useDeviceAccess,
@@ -404,8 +404,12 @@ export default function DeviceDetailPage() {
 
           <section className="card p-5">
             <h2 className="mb-3 font-medium">Agent enrollment</h2>
-            <p className="mb-3 text-sm text-zinc-500 ">
-              Reinstalling the agent, or moving it to a new machine, needs a fresh one-time code.
+            <p className="mb-3 text-sm text-zinc-500">
+              Reinstalling the agent, or moving it to a new machine, needs a fresh one-time code.{' '}
+              <a href={`${API_URL}/api/v1/agent/download`} className="font-medium text-brand-600 hover:underline">
+                Download the agent
+              </a>{' '}
+              first if that machine does not already have it.
             </p>
             <button type="button" className="btn-secondary w-full" onClick={() => void handleIssueCode()}>
               Generate new code

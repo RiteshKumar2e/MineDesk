@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { StatusDot } from '../components/StatusDot';
-import { ApiError } from '../lib/apiClient';
+import { API_URL, ApiError } from '../lib/apiClient';
 import { useCreateDevice, useDevices } from '../lib/deviceQueries';
 import { useCreateSession } from '../lib/sessionQueries';
 
@@ -57,6 +57,9 @@ export default function DevicesPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          <a href={`${API_URL}/api/v1/agent/download`} className="btn-secondary">
+            Download Agent
+          </a>
           <button type="button" className="btn-secondary" onClick={() => setShowConnect(true)}>
             Connect to a device
           </button>
@@ -156,8 +159,11 @@ export default function DevicesPage() {
           ) : (
             <div>
               <h2 className="mb-2 font-medium">Install the Remote Agent on that computer</h2>
-              <p className="mb-3 text-sm text-zinc-500 ">
-                Run this command on the target machine. The code expires{' '}
+              <p className="mb-3 text-sm text-zinc-500">
+                <a href={`${API_URL}/api/v1/agent/download`} className="font-medium text-brand-600 hover:underline">
+                  Download the agent
+                </a>{' '}
+                on the target machine, then run this command from where you saved it. The code expires{' '}
                 {new Date(enrollment.expiresAt).toLocaleTimeString()} and can only be used once.
               </p>
               <code className="mb-4 block rounded-lg bg-zinc-900 px-3 py-2 text-sm text-emerald-300">

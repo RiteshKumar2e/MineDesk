@@ -1,6 +1,6 @@
 import type { ApiErrorBody } from '@minedesk/types';
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+export const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
 
 export class ApiError extends Error {
   readonly code: string;
@@ -41,7 +41,12 @@ type RequestOptions = {
 };
 
 async function rawRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  // Only set Content-Type when there is an actual body to describe - the API
+  // (Fastify's JSON body parser) rejects a request that claims
+  // 'application/json' but sends nothing, which every bodyless call here
+  // (refresh, logout, delete, ...) would otherwise do.
+  const headers: Record<string, string> = {};
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
   const response = await fetch(`${API_URL}${path}`, {

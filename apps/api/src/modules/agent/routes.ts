@@ -2,6 +2,10 @@ import { AuditAction, ErrorCode } from '@minedesk/protocol';
 import { grantedCapabilities } from '@minedesk/shared';
 import { generateAgentSecret, normalizeCode } from '@minedesk/shared/ids';
 import type { FastifyInstance } from 'fastify';
+import { createReadStream } from 'node:fs';
+import { stat as stat_ } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import path from 'node:path';
 import { env } from '../../config/env.js';
 import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { hashPassword, verifyPassword } from '../../lib/crypto.js';
@@ -176,5 +180,56 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       ...auditRequestContext(request),
     });
     return reply.send({ ok: true });
+  });
+
+  // -------------------------------------------------------------- download
+  // Unlike everything above, this is not called by the agent itself - it is
+  // what the dashboard's "Download Agent" button points at, so a person can
+  // get the installer the same way they would from AnyDesk's site: no
+  // account needed to fetch the file (enrolling it afterward does need one).
+  // See AGENT_DOWNLOAD_URL's doc comment in config/env.ts for the two modes.
+  app.get('/download', { config: { rateLimit: false } }, async (request, reply) => {
+    if (env.AGENT_DOWNLOAD_URL) {
+      return reply.redirect(env.AGENT_DOWNLOAD_URL, 302);
+    }
+
+    if (env.isProduction) {
+      // No hosted URL configured: refuse rather than reach for a local file
+      // that, in a real deployment, belongs to a different machine entirely.
+      throw new AppError(ErrorCode.NOT_FOUND, {
+        message: 'No agent download is configured. Set AGENT_DOWNLOAD_URL.',
+      });
+    }
+
+    // Prefer the configured (release) path, but a debug build satisfies
+    // local testing just as well and there is no reason to make someone
+    // wait through a ~20 minute release rebuild just to click the button.
+    const candidates = [
+      path.resolve(process.cwd(), env.AGENT_BINARY_PATH),
+      path.resolve(process.cwd(), env.AGENT_BINARY_PATH.replace('/release/', '/debug/')),
+    ];
+
+    let binaryPath: string | undefined;
+    let stat: Stats | undefined;
+    for (const candidate of candidates) {
+      try {
+        stat = await stat_(candidate);
+        binaryPath = candidate;
+        break;
+      } catch {
+        // try the next candidate
+      }
+    }
+
+    if (!binaryPath || !stat) {
+      throw new AppError(ErrorCode.NOT_FOUND, {
+        message: `No agent binary found. Build one first: cd apps/agent && cargo build --release (or plain cargo build for a debug binary). Looked in: ${candidates.join(', ')}`,
+      });
+    }
+
+    reply.header('Content-Type', 'application/vnd.microsoft.portable-executable');
+    reply.header('Content-Disposition', 'attachment; filename="minedesk-agent.exe"');
+    reply.header('Content-Length', stat.size);
+    return reply.send(createReadStream(binaryPath));
   });
 }

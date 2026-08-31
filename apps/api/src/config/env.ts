@@ -65,6 +65,17 @@ const schema = z.object({
   AGENT_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(20_000),
   AGENT_PRESENCE_TTL_SECONDS: z.coerce.number().int().positive().default(45),
 
+  // Where GET /api/v1/agent/download gets the installer from. In production
+  // this should be AGENT_DOWNLOAD_URL, pointing at wherever the built
+  // installer is actually hosted (a CDN, object storage, a GitHub Release) -
+  // the API redirects there rather than serving the file itself. Without it,
+  // the API falls back to streaming a local file at AGENT_BINARY_PATH, which
+  // is only meant for local development (see RUN.md) - it requires the exact
+  // machine running the API to also have a built agent binary on disk, which
+  // is not a real deployment story.
+  AGENT_DOWNLOAD_URL: z.string().url().optional(),
+  AGENT_BINARY_PATH: z.string().default('../agent/target/release/minedesk-agent.exe'),
+
   // Brute-force policy.
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
   LOGIN_LOCKOUT_MINUTES: z.coerce.number().int().positive().default(15),
