@@ -65,7 +65,7 @@ enum Command {
     Enroll {
         #[arg(long)]
         code: String,
-        #[arg(long, default_value = "https://api.minedesk.example.com", env = "MINEDESK_API_URL")]
+        #[arg(long, default_value = "https://minedesk.onrender.com", env = "MINEDESK_API_URL")]
         api_url: String,
     },
     /// Run the agent using a previously saved enrollment. This is also the
@@ -73,23 +73,36 @@ enum Command {
     /// invoke the binary directly. With no saved enrollment yet, this
     /// self-registers instead of failing - see `run`'s doc comment.
     Run {
-        #[arg(long, default_value = "https://api.minedesk.example.com", env = "MINEDESK_API_URL")]
+        #[arg(long, default_value = "https://minedesk.onrender.com", env = "MINEDESK_API_URL")]
         api_url: String,
     },
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Run {
-        api_url: std::env::var("MINEDESK_API_URL").unwrap_or_else(|_| "https://api.minedesk.example.com".to_string()),
+    let result = match cli.command.unwrap_or(Command::Run {
+        api_url: std::env::var("MINEDESK_API_URL").unwrap_or_else(|_| "https://minedesk.onrender.com".to_string()),
     }) {
         Command::Enroll { code, api_url } => enroll(&code, &api_url).await,
         Command::Run { api_url } => run(&api_url).await,
+    };
+
+    // Someone who launched this by double-clicking it in Explorer has no
+    // terminal of their own to fall back on - without this, an error (bad
+    // network, wrong URL) prints and the window closes in the same instant,
+    // which looks exactly like the program never ran at all. Pausing here
+    // costs nothing when run from an existing terminal - just one more Enter.
+    if let Err(err) = result {
+        eprintln!("\nError: {err:?}\n");
+        eprintln!("Press Enter to close this window...");
+        let mut discard = String::new();
+        let _ = std::io::stdin().read_line(&mut discard);
+        std::process::exit(1);
     }
 }
 
