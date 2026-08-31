@@ -48,6 +48,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 
 #[derive(Parser)]
@@ -573,7 +574,16 @@ async fn accept_session(
             urls: s.urls.clone(),
             username: s.username.clone().unwrap_or_default(),
             credential: s.credential.clone().unwrap_or_default(),
-            ..Default::default()
+            // `..Default::default()` here would leave this Unspecified, and
+            // webrtc-rs's RTCIceServer::validate() rejects *any* turn:/turns:
+            // entry whose credential_type isn't Password or Oauth with
+            // ErrTurnCredentials - confirmed as the actual cause of every
+            // `new_peer_connection` failure once a real TURN server (with
+            // real username/credential) reached this code, which nothing
+            // before the first live end-to-end session ever exercised. A
+            // plain stun: entry ignores this field entirely, so setting it
+            // unconditionally is correct for both cases, not just TURN.
+            credential_type: RTCIceCredentialType::Password,
         })
         .collect();
 
@@ -608,7 +618,12 @@ async fn accept_session(
             }
         }
         Err(err) => {
-            error!(error = %err, "failed to start session");
+            // {:#} rather than the usual %err/Display: anyhow::Error's plain
+            // Display only prints the top .context() frame, which is exactly
+            // what hid the real cause (ErrTurnCredentials, several layers
+            // down) the first time this ever fired against a live session -
+            // {:#} prints the full "context: context: root cause" chain.
+            error!(error = format!("{err:#}"), "failed to start session");
             let _ = sender.lock().await.send(&ClientFrame::session_deny(session_id, "policy")).await;
         }
     }

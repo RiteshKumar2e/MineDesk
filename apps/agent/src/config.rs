@@ -74,27 +74,48 @@ impl AgentConfig {
     }
 }
 
-/// Best-effort ACL tightening: SYSTEM and Administrators only. This shells out
-/// to `icacls` rather than pulling in a Windows ACL crate, since it is a
-/// one-shot operation at enrollment time, not a hot path. A failure here is
-/// logged, not fatal - the file still exists with whatever default ACL
-/// %ProgramData% grants, which is the same trust boundary a great many
-/// Windows services already rely on.
+/// Best-effort ACL tightening: SYSTEM, Administrators, and whichever account
+/// just ran `enroll`. This shells out to `icacls` rather than pulling in a
+/// Windows ACL crate, since it is a one-shot operation at enrollment time,
+/// not a hot path. A failure here is logged, not fatal - the file still
+/// exists with whatever default ACL %ProgramData% grants, which is the same
+/// trust boundary a great many Windows services already rely on.
+///
+/// The invoking account is included deliberately, not as a workaround: this
+/// phase's agent has no Windows service mode yet (see README's Known
+/// limitations), so it only ever runs as whichever ordinary user invoked
+/// `enroll`/`run` - never as SYSTEM. Granting only SYSTEM/Administrators and
+/// nothing else means that same ordinary user's own later `run` fails to
+/// read the file it just wrote, because UAC's split token means an
+/// administrator's *non-elevated* shell does not carry the enabled
+/// Administrators SID an ACL check sees - confirmed as a real failure
+/// ("Access is denied. (os error 5)"), not just a theoretical gap. Once real
+/// service-mode hosting exists, the service account should be granted here
+/// instead of (or alongside) the interactive user.
 #[cfg(windows)]
 fn restrict_permissions(path: &std::path::Path) {
     use std::process::Command;
-    let result = Command::new("icacls")
-        .arg(path)
+    let mut cmd = Command::new("icacls");
+    cmd.arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")
         .arg("SYSTEM:F")
         .arg("/grant:r")
-        .arg("*S-1-5-32-544:F") // Administrators, by well-known SID (locale-independent)
-        .output();
+        .arg("*S-1-5-32-544:F"); // Administrators, by well-known SID (locale-independent)
+
+    if let Ok(user) = std::env::var("USERNAME") {
+        let grantee = match std::env::var("USERDOMAIN") {
+            Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}:F"),
+            _ => format!("{user}:F"),
+        };
+        cmd.arg("/grant:r").arg(grantee);
+    }
+
+    let result = cmd.output();
 
     match result {
         Ok(output) if output.status.success() => {
-            tracing::debug!("restricted agent.toml permissions to SYSTEM and Administrators");
+            tracing::debug!("restricted agent.toml permissions to SYSTEM, Administrators and the current user");
         }
         Ok(output) => {
             tracing::warn!(

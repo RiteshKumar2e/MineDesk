@@ -70,6 +70,7 @@ fixes:
   e.g. `wsl -u root -e bash -c "service redis-server start && tail -f /dev/null"`
   left running in its own terminal.
 - **Permanent**: create/edit `%UserProfile%\.wslconfig` with:
+
   ```ini
   [wsl2]
   vmIdleTimeout=-1
