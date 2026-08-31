@@ -13,9 +13,13 @@ export interface Mailer {
 }
 
 /**
- * Development transport. Prints the message - including the action link - to the
- * log so verification and reset flows are testable without an SMTP server.
- * Only ever selected when MAIL_TRANSPORT=console, and refused in production.
+ * Prints the message - including the action link - to the log instead of
+ * sending real email. Selected whenever MAIL_TRANSPORT=console, including in
+ * production if no SMTP provider is configured yet: verification and
+ * password-reset links then only reach whoever can read the deploy's logs
+ * (e.g. the Render dashboard), not the account holder's actual inbox - fine
+ * for a single operator's own accounts, not for real end users signing
+ * themselves up. Switch to MAIL_TRANSPORT=smtp before that matters.
  */
 class ConsoleMailer implements Mailer {
   async send(message: OutgoingMail): Promise<void> {
@@ -63,9 +67,6 @@ function createMailer(): Mailer {
   if (env.MAIL_TRANSPORT === 'smtp') {
     if (!env.SMTP_HOST) throw new Error('MAIL_TRANSPORT=smtp requires SMTP_HOST');
     return new SmtpMailer();
-  }
-  if (env.isProduction) {
-    throw new Error('MAIL_TRANSPORT=console is not permitted in production');
   }
   return new ConsoleMailer();
 }
