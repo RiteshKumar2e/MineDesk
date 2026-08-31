@@ -7,6 +7,7 @@ import DeviceDetailPage from './pages/DeviceDetailPage';
 import DevicesPage from './pages/DevicesPage';
 import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import LoginPage from './pages/LoginPage';
+import QuickConnectPage from './pages/QuickConnectPage';
 import RegisterPage from './pages/RegisterPage';
 import RemoteSessionPage from './pages/RemoteSessionPage';
 import ResetPasswordPage from './pages/ResetPasswordPage';
@@ -27,6 +28,7 @@ export default function App() {
 
   return (
     <Routes>
+      <Route path="/connect" element={<QuickConnectPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />

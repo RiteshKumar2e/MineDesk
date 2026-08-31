@@ -74,4 +74,6 @@ export const STRICT_LIMITS = {
   agentAuth: { max: 30, timeWindow: '5 minutes' },
   /** Unattended-access password guessing. */
   sessionCreate: { max: 30, timeWindow: '5 minutes' },
+  /** Guest-account creation for the no-login Quick Connect flow - account farming risk. */
+  guest: { max: 10, timeWindow: '1 hour' },
 } as const;

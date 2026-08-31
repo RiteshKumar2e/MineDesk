@@ -12,6 +12,7 @@ import {
   disableTwoFactorSchema,
   enableTwoFactorSchema,
   forgotPasswordSchema,
+  guestSchema,
   loginSchema,
   registerSchema,
   resetPasswordSchema,
@@ -22,6 +23,7 @@ import {
   authenticateCredentials,
   changePassword,
   consumeTwoFactorChallenge,
+  createGuestUser,
   createTwoFactorChallenge,
   issueSession,
   listAuthSessions,
@@ -84,6 +86,23 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/register', { config: { rateLimit: STRICT_LIMITS.register } }, async (request, reply) => {
     const input = registerSchema.parse(request.body);
     const user = await registerUser(input, meta(request));
+    const session = await issueSession(user, meta(request));
+    setRefreshCookie(reply, session.refreshToken);
+
+    return reply.status(201).send({
+      user: toPublicUser(user),
+      accessToken: session.accessToken,
+      expiresIn: session.expiresIn,
+    });
+  });
+
+  // ---------------------------------------------------------------- guest
+  // The no-login "Quick Connect" front door - see createGuestUser's comment
+  // for why this mints a real, disposable account instead of a special-cased
+  // anonymous path.
+  app.post('/guest', { config: { rateLimit: STRICT_LIMITS.guest } }, async (request, reply) => {
+    const input = guestSchema.parse(request.body);
+    const user = await createGuestUser(input.name, meta(request));
     const session = await issueSession(user, meta(request));
     setRefreshCookie(reply, session.refreshToken);
 

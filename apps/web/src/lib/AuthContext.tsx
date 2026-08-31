@@ -9,6 +9,8 @@ interface AuthContextValue {
   login: (email: string, password: string, totp?: string) => Promise<LoginResult>;
   completeTwoFactor: (challengeToken: string, code: string) => Promise<void>;
   register: (email: string, name: string, password: string) => Promise<void>;
+  /** The no-signup "Quick Connect" front door - see createGuestUser's comment on the API side. */
+  guestConnect: (name: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
@@ -70,6 +72,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(res.user);
   }, []);
 
+  const guestConnect = useCallback(async (name: string) => {
+    const res = await api.post<{ user: PublicUser; accessToken: string }>('/api/v1/auth/guest', { name });
+    setAccessToken(res.accessToken);
+    setUser(res.user);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await api.post('/api/v1/auth/logout');
@@ -80,8 +88,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, loading, login, completeTwoFactor, register, logout, refreshUser }),
-    [user, loading, login, completeTwoFactor, register, logout, refreshUser],
+    () => ({ user, loading, login, completeTwoFactor, register, guestConnect, logout, refreshUser }),
+    [user, loading, login, completeTwoFactor, register, guestConnect, logout, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

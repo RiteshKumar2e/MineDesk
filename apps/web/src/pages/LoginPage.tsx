@@ -121,10 +121,16 @@ export default function LoginPage() {
           {submitting ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
-      <p className="mt-5 text-center text-sm text-zinc-500 ">
+      <p className="mt-5 text-center text-sm text-zinc-500">
         Don&apos;t have an account?{' '}
         <Link to="/register" className="font-medium text-brand-600 hover:underline">
           Create one
+        </Link>
+      </p>
+      <p className="mt-2 text-center text-sm text-zinc-500">
+        Just connecting to someone else&apos;s device?{' '}
+        <Link to="/connect" className="font-medium text-brand-600 hover:underline">
+          Connect without an account
         </Link>
       </p>
     </AuthShell>

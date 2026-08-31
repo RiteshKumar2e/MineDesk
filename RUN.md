@@ -160,6 +160,16 @@ enrollment code shaped like `ENR-XXXX-XXXX`. That code is what the agent
 below trades for a real device credential - it's single-use and expires, so
 generate it right before you run `enroll`.
 
+**Connecting without an account**: once a device is enrolled, anyone with its
+`RMT-XXXX-XXXX` ID can request a connection at http://localhost:5173/connect
+- no MineDesk account needed, matching AnyDesk's own "just type an address"
+front door. It works via a real but disposable account minted silently
+behind that page (see `createGuestUser`'s comment in
+`apps/api/src/modules/auth/service.ts`), so the existing owner/live-consent/
+unattended-password rules apply exactly as they do for a signed-in stranger -
+the person at the device still has to approve the request unless a valid
+unattended password was given.
+
 ## Building and running the Rust agent
 
 The agent (`apps/agent`) is what actually gets controlled - it captures the

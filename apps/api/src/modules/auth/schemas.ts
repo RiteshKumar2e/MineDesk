@@ -48,6 +48,10 @@ export const registerSchema = z.object({
   password: passwordSchema,
 });
 
+export const guestSchema = z.object({
+  name: z.string().trim().max(60).default('Guest'),
+});
+
 export const loginSchema = z.object({
   email: emailSchema,
   password: z.string().min(1, 'Enter your password.').max(200),

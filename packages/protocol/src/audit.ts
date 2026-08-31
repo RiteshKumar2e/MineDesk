@@ -5,6 +5,7 @@
  */
 export const AuditAction = {
   USER_REGISTERED: 'user.registered',
+  USER_GUEST_CREATED: 'user.guest_created',
   USER_LOGIN: 'user.login',
   USER_LOGIN_FAILED: 'user.login_failed',
   USER_LOGOUT: 'user.logout',
@@ -60,6 +61,7 @@ export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
 /** Human-readable label for the activity feed. */
 export const AUDIT_LABELS: Record<string, string> = {
   'user.registered': 'Account created',
+  'user.guest_created': 'Guest connection started',
   'user.login': 'Signed in',
   'user.login_failed': 'Failed sign-in attempt',
   'user.logout': 'Signed out',

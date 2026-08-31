@@ -68,6 +68,41 @@ export async function registerUser(
   return user;
 }
 
+/**
+ * A throwaway account for the no-login "Quick Connect" flow - the AnyDesk-style
+ * front door where a stranger just types a device ID and asks to connect,
+ * with no signup screen anywhere in between.
+ *
+ * This is deliberately a *real* account, not a special-cased anonymous path
+ * threaded through every session/signaling/audit table: reusing the existing
+ * authenticated session machinery unchanged (JWTs, `RequireAuth`, session
+ * detail/activity endpoints, the signaling socket's auth) means a guest's
+ * request goes through exactly the same ownership, live-consent and
+ * unattended-password checks a signed-in stranger's would, and still leaves a
+ * real, named row in the audit log - "no hidden access" applies to this path
+ * too, not just the account-holding one. The password is random and
+ * discarded: nobody, including the guest, can ever log into this account
+ * again, and it owns no devices.
+ */
+export async function createGuestUser(displayName: string, meta: RequestMeta): Promise<User> {
+  const name = displayName.trim().slice(0, 60) || 'Guest';
+  const user = await prisma.user.create({
+    data: {
+      email: `guest-${randomUUID()}@guest.minedesk.invalid`,
+      name,
+      passwordHash: await hashPassword(generateOpaqueToken(32)),
+    },
+  });
+  await recordAudit({
+    userId: user.id,
+    action: AuditAction.USER_GUEST_CREATED,
+    ipAddress: meta.ip,
+    userAgent: meta.userAgent,
+    metadata: { name },
+  });
+  return user;
+}
+
 // --------------------------------------------------------------------------
 // Login and brute-force protection
 // --------------------------------------------------------------------------
