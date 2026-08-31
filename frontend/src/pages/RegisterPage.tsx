@@ -80,7 +80,7 @@ export default function RegisterPage() {
           {fieldErrors.password ? (
             <p className="mt-1 text-xs text-red-600">{fieldErrors.password}</p>
           ) : (
-            <p className="mt-1 text-xs text-zinc-400">At least 12 characters.</p>
+            <p className="mt-1 text-xs text-zinc-400">At least 6 characters.</p>
           )}
         </div>
         <button type="submit" className="btn-primary w-full" disabled={submitting}>

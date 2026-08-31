@@ -75,10 +75,17 @@ export const enrollSchema = z.object({
   agentVersion: z.string().trim().max(32).optional(),
 });
 
-/** Same shape as enrollSchema, minus the code - see POST /api/v1/agent/register. */
+/**
+ * Same shape as enrollSchema, minus the code - see POST /api/v1/agent/register.
+ * `os: 'browser'` is the browser screen-share path (RemoteSessionPage acting
+ * as the agent, via getDisplayMedia): those devices get screen-only
+ * permissions and are deleted outright when the tab closes, rather than
+ * just marked offline like a real installed agent - see that route and
+ * signaling/routes.ts's close handler.
+ */
 export const selfRegisterSchema = z.object({
   hostname: z.string().trim().min(1).max(128),
-  os: z.enum(['windows', 'macos', 'linux', 'unknown']).default('unknown'),
+  os: z.enum(['windows', 'macos', 'linux', 'browser', 'unknown']).default('unknown'),
   osVersion: z.string().trim().max(64).optional(),
   agentVersion: z.string().trim().max(32).optional(),
 });

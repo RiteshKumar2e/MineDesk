@@ -24,9 +24,17 @@ export interface HubConnection {
   role: ConnectionRole;
   socket: WebSocket;
   userId: string;
-  /** Present for agents: the RMT-... identifier. */
+  /** Present for agents: the 9-digit device id. */
   deviceId?: string;
   deviceRowId?: string;
+  /**
+   * True for a browser tab sharing its own screen (RemoteSessionPage acting
+   * as the agent, see modules/agent/routes.ts's `/register` doc comment) -
+   * unlike a real installed agent, this device is deleted outright on
+   * disconnect rather than just marked offline, so its id can never be
+   * reused once the tab closes.
+   */
+  ephemeral?: boolean;
   /** Sessions this connection is currently attached to. */
   sessions: Set<string>;
   /** Token expiry (unix seconds); the socket is closed when it lapses. */

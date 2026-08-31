@@ -1,10 +1,28 @@
 import { formatDeviceId, normalizeCode } from '../vendor/shared/idFormat';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { StatusDot } from '../components/StatusDot';
 import { API_URL, ApiError } from '../lib/apiClient';
 import { useCreateDevice, useDevices } from '../lib/deviceQueries';
 import { useCreateSession } from '../lib/sessionQueries';
+
+function InfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 16v-5M12 8h.01" />
+    </svg>
+  );
+}
+
+function LockIcon({ open }: { open: boolean }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="11" width="16" height="9" rx="2" />
+      {open ? <path d="M7 11V8a5 5 0 0 1 9-3" /> : <path d="M7 11V7a5 5 0 0 1 10 0v4" />}
+    </svg>
+  );
+}
 
 export default function DevicesPage() {
   const { data, isLoading, error } = useDevices();
@@ -17,10 +35,35 @@ export default function DevicesPage() {
   const [enrollment, setEnrollment] = useState<{ code: string; command: string; expiresAt: string } | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
-  const [showConnect, setShowConnect] = useState(false);
   const [connectId, setConnectId] = useState('');
   const [connectPassword, setConnectPassword] = useState('');
   const [connectError, setConnectError] = useState<string | null>(null);
+
+  // Which of the user's own devices is shown as "Your Address". Defaults to
+  // whichever is reachable right now, since that's the one worth handing out.
+  const [addressDeviceId, setAddressDeviceId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
+
+  const devices = data?.devices ?? [];
+  const addressDevice =
+    devices.find((d) => d.id === addressDeviceId) ?? devices.find((d) => d.status === 'online') ?? devices[0] ?? null;
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  async function copyAddress() {
+    if (!addressDevice) return;
+    try {
+      await navigator.clipboard.writeText(addressDevice.deviceId);
+      setCopied(true);
+    } catch {
+      /* clipboard blocked (insecure origin, denied permission) - the ID is on screen anyway */
+    }
+  }
 
   async function handleAdd(e: FormEvent) {
     e.preventDefault();
@@ -50,79 +93,135 @@ export default function DevicesPage() {
 
   return (
     <div>
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold">My Devices</h1>
-          <p className="text-sm text-zinc-500 ">
-            Computers you can remotely access once the agent is installed and authorized.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <a href={`${API_URL}/api/v1/agent/download`} className="btn-secondary">
-            Download Agent
-          </a>
-          <button type="button" className="btn-secondary" onClick={() => setShowConnect(true)}>
-            Connect to a device
-          </button>
-          <button type="button" className="btn-primary" onClick={() => setShowAdd(true)}>
-            + Add device
-          </button>
-        </div>
-      </div>
+      {/* The two directions of a remote session, side by side, the way a
+          remote-desktop tool is expected to present them: the address other
+          people use to reach you, and the box you type someone else's into. */}
+      <div className="mb-8 grid gap-4 lg:grid-cols-2">
+        <div className="card p-6">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Your Address</h2>
+              <p className="mt-1 text-sm text-zinc-500">Share this so someone can request access to you.</p>
+            </div>
+            <a href={`${API_URL}/api/v1/agent/download`} className="btn-secondary shrink-0">
+              Download Agent
+            </a>
+          </div>
 
-      {showConnect && (
-        <div className="card mb-6 p-5">
-          <h2 className="mb-1 font-medium">Connect to a device</h2>
-          <p className="mb-3 text-sm text-zinc-500">
-            Enter the device ID someone shared with you. They will get a prompt on that computer and have to
-            approve the connection before you see anything. The access password is only for connecting to a
-            device that has been left unattended - leave it blank otherwise.
+          {isLoading && <p className="text-sm text-zinc-500">Loading...</p>}
+
+          {!isLoading && !addressDevice && (
+            <div className="rounded-xl border border-dashed border-zinc-300 p-5 text-center">
+              <p className="text-sm text-zinc-500">
+                No address yet - install the agent on a computer to give it one.
+              </p>
+              <button type="button" className="btn-primary mt-3" onClick={() => setShowAdd(true)}>
+                + Add device
+              </button>
+            </div>
+          )}
+
+          {addressDevice && (
+            <>
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-mono text-4xl font-semibold tabular-nums tracking-tight text-brand-700">
+                  {formatDeviceId(addressDevice.deviceId)}
+                </span>
+                <button type="button" className="btn-secondary" onClick={copyAddress}>
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+                <div className="relative ml-auto flex items-center gap-1 text-zinc-400">
+                  <button
+                    type="button"
+                    className="rounded-full p-1.5 hover:bg-zinc-100 hover:text-zinc-600"
+                    aria-label="What is this address?"
+                    onClick={() => setShowInfo((v) => !v)}
+                    onBlur={() => setShowInfo(false)}
+                  >
+                    <InfoIcon />
+                  </button>
+                  {showInfo && (
+                    <div className="absolute right-0 top-full z-10 mt-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-600 shadow-lg">
+                      Anyone with this address can request to connect. You will get a prompt to approve
+                      it, unless unattended access is enabled for this device.
+                    </div>
+                  )}
+                  <Link
+                    to={`/devices/${addressDevice.id}`}
+                    className="rounded-full p-1.5 hover:bg-zinc-100 hover:text-zinc-600"
+                    title={addressDevice.unattendedAccessEnabled ? 'Unattended access is on' : 'Approval required to connect'}
+                  >
+                    <LockIcon open={addressDevice.unattendedAccessEnabled} />
+                  </Link>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-2 text-sm text-zinc-500">
+                <StatusDot online={addressDevice.status === 'online'} />
+                <span className="font-medium text-zinc-700">{addressDevice.name}</span>
+                <span>·</span>
+                <span>{addressDevice.status === 'online' ? 'Online now' : 'Offline'}</span>
+              </div>
+              {devices.length > 1 && (
+                <select
+                  className="input mt-3"
+                  value={addressDevice.id}
+                  onChange={(e) => setAddressDeviceId(e.target.value)}
+                  aria-label="Which of your devices to show the address for"
+                >
+                  {devices.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.name} - {formatDeviceId(device.deviceId)}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="card p-6">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Remote Address</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            Enter the ID of the device you want to control. They get a prompt and have to approve it before
+            you see anything - unless you have their access password.
           </p>
-          <form onSubmit={handleConnect} className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="label" htmlFor="connect-id">
-                Device ID
-              </label>
-              <input
-                id="connect-id"
-                className="input font-mono"
-                placeholder="552 246 274"
-                inputMode="numeric"
-                required
-                value={connectId}
-                onChange={(e) => setConnectId(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="connect-password">
-                Access password <span className="font-normal text-zinc-400">(optional)</span>
-              </label>
-              <input
-                id="connect-password"
-                type="password"
-                className="input"
-                placeholder="Only for unattended access"
-                value={connectPassword}
-                onChange={(e) => setConnectPassword(e.target.value)}
-              />
-            </div>
-            <button type="submit" className="btn-primary" disabled={createSession.isPending}>
+          <form onSubmit={handleConnect} className="mt-4 space-y-3">
+            <input
+              id="connect-id"
+              className="input font-mono text-lg tabular-nums"
+              placeholder="552 246 274"
+              inputMode="numeric"
+              required
+              value={connectId}
+              onChange={(e) => setConnectId(e.target.value)}
+            />
+            <input
+              id="connect-password"
+              type="password"
+              className="input"
+              placeholder="Access password - only for unattended access"
+              value={connectPassword}
+              onChange={(e) => setConnectPassword(e.target.value)}
+            />
+            <button type="submit" className="btn-primary w-full" disabled={createSession.isPending}>
               {createSession.isPending ? 'Connecting...' : 'Connect'}
-            </button>
-            <button
-              type="button"
-              className="btn-ghost"
-              onClick={() => {
-                setShowConnect(false);
-                setConnectError(null);
-              }}
-            >
-              Cancel
             </button>
           </form>
           {connectError && <p className="mt-2 text-sm text-red-600">{connectError}</p>}
         </div>
-      )}
+      </div>
+
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">My Devices</h1>
+          <p className="text-sm text-zinc-500">
+            Computers you can remotely access once the agent is installed and authorized.
+          </p>
+        </div>
+        <button type="button" className="btn-primary" onClick={() => setShowAdd(true)}>
+          + Add device
+        </button>
+      </div>
 
       {showAdd && (
         <div className="card mb-6 p-5">
@@ -189,14 +288,14 @@ export default function DevicesPage() {
       {isLoading && <p className="text-sm text-zinc-500">Loading devices...</p>}
       {error && <p className="text-sm text-red-600">Could not load devices.</p>}
 
-      {data && data.devices.length === 0 && (
+      {data && devices.length === 0 && (
         <div className="card p-10 text-center text-sm text-zinc-500 ">
           No devices yet. Add one to get an installation command for the Remote Agent.
         </div>
       )}
 
       <div className="grid gap-4 sm:grid-cols-2">
-        {data?.devices.map((device) => (
+        {devices.map((device) => (
           <Link
             key={device.id}
             to={`/devices/${device.id}`}

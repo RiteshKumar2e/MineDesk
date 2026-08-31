@@ -204,7 +204,20 @@ describe('session creation', () => {
       method: 'PUT',
       url: `/api/v1/devices/${device.id}/permissions`,
       headers: { authorization: `Bearer ${accessToken}` },
-      payload: { screen: false, mouse: false, keyboard: false, clipboard: false },
+      // Every capability defaults to true (AnyDesk-style) now, so all of
+      // them have to be explicitly disabled to actually reach "none enabled".
+      payload: {
+        screen: false,
+        mouse: false,
+        keyboard: false,
+        clipboard: false,
+        fileUpload: false,
+        fileDownload: false,
+        fileDelete: false,
+        audio: false,
+        camera: false,
+        microphone: false,
+      },
     });
 
     await markDeviceOnline({

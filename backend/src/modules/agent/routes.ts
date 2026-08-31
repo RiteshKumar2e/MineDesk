@@ -1,5 +1,5 @@
 import { AuditAction, ErrorCode } from '../../vendor/protocol/index.js';
-import { grantedCapabilities } from '../../vendor/shared/index.js';
+import { DEFAULT_PERMISSIONS, grantedCapabilities } from '../../vendor/shared/index.js';
 import { generateAgentSecret, normalizeCode } from '../../vendor/shared/ids.js';
 import type { FastifyInstance } from 'fastify';
 import { createReadStream } from 'node:fs';
@@ -131,6 +131,12 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     const secretHash = await hashPassword(secret);
     const timestamp = nowIso();
 
+    // A browser tab can display a video track but has no way to inject
+    // keyboard/mouse input into the OS, touch the clipboard, or read a real
+    // filesystem - grant only what it can actually honor, regardless of
+    // whatever a client might ask for later via PUT /devices/:id/permissions.
+    const isBrowser = input.os === 'browser';
+
     await batch([
       {
         sql: `INSERT INTO devices (id, deviceId, userId, name, hostname, os, osVersion, agentVersion,
@@ -151,10 +157,36 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
           timestamp,
         ],
       },
-      {
-        sql: `INSERT INTO device_permissions (id, deviceId, updatedAt) VALUES (?, ?, ?)`,
-        args: [newId(), deviceRowId, timestamp],
-      },
+      isBrowser
+        ? {
+            sql: `INSERT INTO device_permissions
+                  (id, deviceId, screen, mouse, keyboard, clipboard, fileUpload, fileDownload, fileDelete, audio, camera, microphone, updatedAt)
+                  VALUES (?, ?, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, ?)`,
+            args: [newId(), deviceRowId, timestamp],
+          }
+        : {
+            // Explicit values from DEFAULT_PERMISSIONS, not the table's own
+            // column defaults - see devices/service.ts's createDevice for
+            // why those aren't relied on any more.
+            sql: `INSERT INTO device_permissions
+                  (id, deviceId, screen, mouse, keyboard, clipboard, fileUpload, fileDownload, fileDelete, audio, camera, microphone, updatedAt)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              newId(),
+              deviceRowId,
+              DEFAULT_PERMISSIONS.screen ? 1 : 0,
+              DEFAULT_PERMISSIONS.mouse ? 1 : 0,
+              DEFAULT_PERMISSIONS.keyboard ? 1 : 0,
+              DEFAULT_PERMISSIONS.clipboard ? 1 : 0,
+              DEFAULT_PERMISSIONS.fileUpload ? 1 : 0,
+              DEFAULT_PERMISSIONS.fileDownload ? 1 : 0,
+              DEFAULT_PERMISSIONS.fileDelete ? 1 : 0,
+              DEFAULT_PERMISSIONS.audio ? 1 : 0,
+              DEFAULT_PERMISSIONS.camera ? 1 : 0,
+              DEFAULT_PERMISSIONS.microphone ? 1 : 0,
+              timestamp,
+            ],
+          },
     ]);
 
     const loaded = await loadDeviceById(deviceRowId);

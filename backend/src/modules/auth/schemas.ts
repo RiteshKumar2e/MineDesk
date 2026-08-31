@@ -3,13 +3,39 @@ import { z } from 'zod';
 /**
  * Password policy.
  *
- * Length is the control that actually matters, so the floor is 12 characters
- * rather than a shorter minimum padded out with composition rules. A short
- * denylist catches the handful of passwords that appear in every credential
- * dump; a production deployment should replace it with a k-anonymity check
- * against Have I Been Pwned (see docs/SECURITY.md).
+ * The floor is 6 characters. That is short for a password guarding remote
+ * control of someone's desktop - 12+ is what actually resists offline
+ * cracking - so the denylist and distinct-character checks below are doing
+ * more work than they otherwise would. Argon2id hashing (lib/crypto.ts) and
+ * the account lockout after repeated failed logins are what keep a short
+ * password from being trivially brute-forced online. A production
+ * deployment should raise this floor and replace the denylist with a
+ * k-anonymity check against Have I Been Pwned (see docs/SECURITY.md).
  */
 const COMMON_PASSWORDS = new Set([
+  // Short ones matter most now that the floor is 6 - these are the top of
+  // every credential dump and would otherwise pass on length alone.
+  '123456',
+  '1234567',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'qwerty',
+  'qwerty123',
+  'abc123',
+  'letmein',
+  'welcome',
+  'iloveyou',
+  'admin',
+  'admin123',
+  'minedesk',
+  'monkey',
+  'dragon',
+  'football',
+  'baseball',
+  'sunshine',
+  'princess',
+  // Longer classics, kept from before.
   'password',
   'password1',
   'password123',
@@ -26,7 +52,7 @@ const COMMON_PASSWORDS = new Set([
 
 export const passwordSchema = z
   .string()
-  .min(12, 'Password must be at least 12 characters.')
+  .min(6, 'Password must be at least 6 characters.')
   .max(200, 'Password must be at most 200 characters.')
   .refine((value) => !COMMON_PASSWORDS.has(value.toLowerCase()), {
     message: 'That password is too common. Choose something less predictable.',

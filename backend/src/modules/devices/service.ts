@@ -146,8 +146,28 @@ export async function createDevice(
       args: [deviceRowId, deviceId, userId, name, timestamp, timestamp],
     },
     {
-      sql: `INSERT INTO device_permissions (id, deviceId, updatedAt) VALUES (?, ?, ?)`,
-      args: [newId(), deviceRowId, timestamp],
+      // Explicit values from DEFAULT_PERMISSIONS, not the table's own column
+      // defaults - those describe schema history at this point, not current
+      // policy, since changing them doesn't retroactively apply to an
+      // already-created database. This is the one source of truth.
+      sql: `INSERT INTO device_permissions
+            (id, deviceId, screen, mouse, keyboard, clipboard, fileUpload, fileDownload, fileDelete, audio, camera, microphone, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        newId(),
+        deviceRowId,
+        DEFAULT_PERMISSIONS.screen ? 1 : 0,
+        DEFAULT_PERMISSIONS.mouse ? 1 : 0,
+        DEFAULT_PERMISSIONS.keyboard ? 1 : 0,
+        DEFAULT_PERMISSIONS.clipboard ? 1 : 0,
+        DEFAULT_PERMISSIONS.fileUpload ? 1 : 0,
+        DEFAULT_PERMISSIONS.fileDownload ? 1 : 0,
+        DEFAULT_PERMISSIONS.fileDelete ? 1 : 0,
+        DEFAULT_PERMISSIONS.audio ? 1 : 0,
+        DEFAULT_PERMISSIONS.camera ? 1 : 0,
+        DEFAULT_PERMISSIONS.microphone ? 1 : 0,
+        timestamp,
+      ],
     },
   ]);
 

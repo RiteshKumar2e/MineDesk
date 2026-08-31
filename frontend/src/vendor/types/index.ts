@@ -10,7 +10,7 @@
  */
 
 /** Operating system family reported by an agent at enrollment time. */
-export type DeviceOs = 'windows' | 'macos' | 'linux' | 'unknown';
+export type DeviceOs = 'windows' | 'macos' | 'linux' | 'browser' | 'unknown';
 
 /** Presence of a device as far as the signaling layer is concerned. */
 export type DeviceStatus = 'online' | 'offline';

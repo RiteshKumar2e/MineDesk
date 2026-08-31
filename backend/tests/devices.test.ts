@@ -39,14 +39,14 @@ describe('devices', () => {
     expect(body.device.deviceId).toMatch(/^\d{9}$/);
     expect(body.device.status).toBe('offline');
     expect(body.enrollment.code).toMatch(/^ENR-[0-9A-Z]{4}-[0-9A-Z]{4}$/);
-    // Conservative defaults: view/control on, everything invasive off.
+    // AnyDesk-style defaults: everything on, no separate opt-in step.
     expect(body.device.permissions).toMatchObject({
       screen: true,
       mouse: true,
       keyboard: true,
-      camera: false,
-      microphone: false,
-      fileDelete: false,
+      camera: true,
+      microphone: true,
+      fileDelete: true,
     });
   });
 
@@ -193,7 +193,9 @@ describe('devices', () => {
       method: 'PUT',
       url: `/api/v1/devices/${deviceRowId}/permissions`,
       headers: { authorization: `Bearer ${accessToken}` },
-      payload: { camera: true, fileDelete: true },
+      // fileDownload is on by default now (AnyDesk-style), so this test has
+      // to explicitly turn it off to still exercise the warning at all.
+      payload: { camera: true, fileDelete: true, fileDownload: false },
     });
 
     expect(res.statusCode).toBe(200);

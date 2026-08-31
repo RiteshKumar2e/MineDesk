@@ -54,8 +54,9 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           revokedAt: string | null;
           agentSecretHash: string | null;
           agentVersion: string | null;
+          os: string;
         }>(
-          'SELECT id, deviceId, userId, revokedAt, agentSecretHash, agentVersion FROM devices WHERE id = ?',
+          'SELECT id, deviceId, userId, revokedAt, agentSecretHash, agentVersion, os FROM devices WHERE id = ?',
           [claims.sub],
         );
         if (!device || device.revokedAt || !device.agentSecretHash) return close(4003, 'TOKEN_INVALID');
@@ -67,6 +68,7 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           userId: device.userId,
           deviceId: device.deviceId,
           deviceRowId: device.id,
+          ephemeral: device.os === 'browser',
           sessions: new Set(),
           tokenExp: typeof claims.exp === 'number' ? claims.exp : 0,
           lastSeen: Date.now(),
@@ -311,22 +313,36 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
       await hub.remove(connection.id);
 
       if (connection.role === 'agent' && connection.deviceId) {
-        await markDeviceOffline(connection.deviceId);
-        await recordAudit({
-          userId: connection.userId,
-          deviceId: connection.deviceRowId ?? null,
-          action: AuditAction.DEVICE_OFFLINE,
-          ipAddress: connection.ip,
-        });
-
-        // A disconnected agent cannot be in a session; close them out so the
-        // dashboard does not show a session that no longer exists.
+        // A disconnected agent cannot be in a session; close it out so the
+        // dashboard does not show a session that no longer exists. Done
+        // before the ephemeral delete below, since that delete cascades
+        // this same row away anyway (ON DELETE CASCADE) - harmless either
+        // order, but recording how the session actually ended only matters
+        // for the non-ephemeral case where the device row survives to show it.
         await execute(
           `UPDATE remote_sessions SET status = 'ended', endedAt = ?, endReason = 'agent_disconnected'
            WHERE status IN ('pending', 'active', 'reconnecting')
            AND deviceId IN (SELECT id FROM devices WHERE deviceId = ?)`,
           [nowIso(), connection.deviceId],
         );
+
+        if (connection.ephemeral && connection.deviceRowId) {
+          // A browser screen-share tab: delete the device outright rather
+          // than marking it offline, so this id can never be reconnected to
+          // or reused - closing the tab is the only "off switch" there is,
+          // and it should behave like one. device_permissions/audit_logs
+          // cascade or null out per db/schema.sql.
+          await execute('DELETE FROM devices WHERE id = ?', [connection.deviceRowId]);
+        } else {
+          await markDeviceOffline(connection.deviceId);
+        }
+
+        await recordAudit({
+          userId: connection.userId,
+          deviceId: connection.ephemeral ? null : (connection.deviceRowId ?? null),
+          action: AuditAction.DEVICE_OFFLINE,
+          ipAddress: connection.ip,
+        });
       }
     });
 

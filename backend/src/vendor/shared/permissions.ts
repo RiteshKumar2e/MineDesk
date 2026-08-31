@@ -3,21 +3,25 @@ import { ALL_CAPABILITIES, type Capability, type PermissionSet } from '../types/
 /**
  * Default permission mask for a newly enrolled device.
  *
- * The defaults are deliberately conservative: viewing and controlling the
- * desktop is on, but anything that reaches a person (camera, microphone) or
- * destroys data (file delete) starts off. The owner turns those on explicitly.
+ * Everything on by default, AnyDesk-style - full remote control, files,
+ * camera, microphone and audio all granted the moment a device is created,
+ * with no separate per-capability opt-in step. Camera and microphone still
+ * go through PROMPTED_CAPABILITIES' live per-session prompt at the remote
+ * machine regardless of this mask (see that constant and session.rs) - this
+ * only controls whether a session is allowed to *ask* for them at all. The
+ * owner can still turn any of this off per device from the dashboard.
  */
 export const DEFAULT_PERMISSIONS: PermissionSet = {
   screen: true,
   mouse: true,
   keyboard: true,
   clipboard: true,
-  fileUpload: false,
-  fileDownload: false,
-  fileDelete: false,
-  audio: false,
-  camera: false,
-  microphone: false,
+  fileUpload: true,
+  fileDownload: true,
+  fileDelete: true,
+  audio: true,
+  camera: true,
+  microphone: true,
 };
 
 /** Capabilities that additionally require a live prompt at the remote machine. */
