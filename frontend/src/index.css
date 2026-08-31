@@ -44,4 +44,16 @@
   .badge {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold;
   }
+
+  /* Dark-background variants, used only on QuickConnectPage's AnyDesk-style
+     home screen - every other page stays on the light-mode classes above. */
+  .btn-solid-brand {
+    @apply btn bg-brand-600 text-white shadow-sm hover:bg-brand-500 active:bg-brand-700;
+  }
+  .btn-outline-brand {
+    @apply btn border border-brand-600 text-brand-500 hover:bg-zinc-800 active:bg-zinc-700;
+  }
+  .input-dark {
+    @apply w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 outline-none ring-brand-500/30 transition-shadow placeholder:text-zinc-500 focus:border-brand-500 focus:ring-4;
+  }
 }

@@ -9,6 +9,83 @@ import { useCreateSession } from '../lib/sessionQueries';
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:4000';
 
+function InfoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 16v-5M12 8h.01" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="11" width="16" height="9" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 2.5l2.9 6.1 6.6.7-4.9 4.6 1.3 6.6-5.9-3.3-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.7 2.9-6.1z" />
+    </svg>
+  );
+}
+
+/**
+ * "Recent" and "Favorites", AnyDesk's other two home-screen tabs - kept in
+ * this browser's localStorage rather than the account, since a guest here
+ * gets a brand new disposable account every visit (see guestConnect) and so
+ * has no server-side history to show. "Discovered" (LAN broadcast scanning)
+ * and "Invitations" (team sharing) are deliberately not built - neither has
+ * anything real behind it in this product yet, and a tab that does nothing
+ * when clicked is worse than no tab at all.
+ */
+interface SavedAddress {
+  deviceId: string;
+  lastConnectedAt: number;
+}
+const RECENT_KEY = 'minedesk:recentAddresses';
+const FAVORITES_KEY = 'minedesk:favoriteAddresses';
+const MAX_RECENT = 8;
+
+function loadAddresses(key: string): SavedAddress[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAddresses(key: string, list: SavedAddress[]): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(list));
+  } catch {
+    /* storage blocked (private mode, quota) - not fatal, just no history */
+  }
+}
+
+function recordRecentConnection(deviceId: string): void {
+  const existing = loadAddresses(RECENT_KEY).filter((a) => a.deviceId !== deviceId);
+  const next = [{ deviceId, lastConnectedAt: Date.now() }, ...existing].slice(0, MAX_RECENT);
+  saveAddresses(RECENT_KEY, next);
+}
+
 /**
  * The AnyDesk-style home screen: "Your Address" and "Remote Address" side by
  * side, both usable with no account.
@@ -36,9 +113,29 @@ export default function QuickConnectPage() {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
+  // ---- Recent / Favorites (localStorage - see the block above) ----
+  const [listTab, setListTab] = useState<'recent' | 'favorites'>('recent');
+  const [recent, setRecent] = useState<SavedAddress[]>([]);
+  const [favorites, setFavorites] = useState<SavedAddress[]>([]);
+
+  useEffect(() => {
+    setRecent(loadAddresses(RECENT_KEY));
+    setFavorites(loadAddresses(FAVORITES_KEY));
+  }, []);
+
+  function toggleFavorite(id: string) {
+    const isFavorite = favorites.some((a) => a.deviceId === id);
+    const next = isFavorite
+      ? favorites.filter((a) => a.deviceId !== id)
+      : [{ deviceId: id, lastConnectedAt: Date.now() }, ...favorites];
+    setFavorites(next);
+    saveAddresses(FAVORITES_KEY, next);
+  }
+
   // ---- Your Address (share this tab's screen) ----
   const [myAddress, setMyAddress] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
   const [incoming, setIncoming] = useState<{ sessionId: string; from: string } | null>(null);
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
@@ -251,22 +348,25 @@ export default function QuickConnectPage() {
     }
   }
 
-  async function handleConnect(e: FormEvent) {
-    e.preventDefault();
+  async function connectTo(rawDeviceId: string, unattendedPassword: string | undefined) {
     setConnectError(null);
     setConnecting(true);
     try {
+      const normalized = normalizeCode(rawDeviceId);
       if (!user) await guestConnect('Guest');
-      const res = await createSession.mutateAsync({
-        deviceId: normalizeCode(deviceId),
-        unattendedPassword: password || undefined,
-      });
+      const res = await createSession.mutateAsync({ deviceId: normalized, unattendedPassword });
+      recordRecentConnection(normalized);
       navigate(`/remote/${res.sessionId}`);
     } catch (err) {
       setConnectError(err instanceof ApiError ? err.message : 'Could not start a session.');
     } finally {
       setConnecting(false);
     }
+  }
+
+  async function handleConnect(e: FormEvent) {
+    e.preventDefault();
+    await connectTo(deviceId, password || undefined);
   }
 
   return (
@@ -292,6 +392,24 @@ export default function QuickConnectPage() {
                 <span className="font-mono text-4xl font-semibold tabular-nums tracking-tight text-brand-700">
                   {formatDeviceId(myAddress)}
                 </span>
+                <div className="relative flex items-center gap-1 text-zinc-400">
+                  <button
+                    type="button"
+                    className="rounded-full p-1.5 hover:bg-zinc-100 hover:text-zinc-600"
+                    aria-label="What is this address?"
+                    onClick={() => setShowInfo((v) => !v)}
+                    onBlur={() => setShowInfo(false)}
+                  >
+                    <InfoIcon />
+                  </button>
+                  {showInfo && (
+                    <div className="absolute left-0 top-full z-10 mt-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-600 shadow-lg">
+                      Anyone with this address can request to view your screen. You will get a prompt to
+                      approve it - this address stops working the moment you close this tab.
+                    </div>
+                  )}
+                  <LockIcon />
+                </div>
                 <button type="button" className="btn-secondary" onClick={copyAddress}>
                   {copied ? 'Copied' : 'Copy'}
                 </button>
@@ -351,6 +469,66 @@ export default function QuickConnectPage() {
             </button>
           </form>
         </div>
+      </div>
+
+      <div className="mx-auto mt-6 max-w-3xl">
+        <div className="mb-3 flex gap-1 border-b border-zinc-200">
+          {(['recent', 'favorites'] as const).map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              onClick={() => setListTab(tab)}
+              className={
+                listTab === tab
+                  ? 'border-b-2 border-brand-600 px-3 py-2 text-sm font-semibold text-brand-700'
+                  : 'border-b-2 border-transparent px-3 py-2 text-sm font-medium text-zinc-500 hover:text-zinc-800'
+              }
+            >
+              {tab === 'recent' ? 'Recent Sessions' : 'Favorites'}
+            </button>
+          ))}
+        </div>
+
+        {(listTab === 'recent' ? recent : favorites).length === 0 ? (
+          <p className="px-1 py-4 text-sm text-zinc-400">
+            {listTab === 'recent'
+              ? 'Addresses you connect to will show up here for quick reconnecting.'
+              : 'Star an address after connecting to it to pin it here.'}
+          </p>
+        ) : (
+          <ul className="divide-y divide-zinc-100">
+            {(listTab === 'recent' ? recent : favorites).map((entry) => (
+              <li key={entry.deviceId} className="flex items-center gap-3 px-1 py-2.5">
+                <button
+                  type="button"
+                  className="text-amber-400 hover:text-amber-500"
+                  aria-label={favorites.some((a) => a.deviceId === entry.deviceId) ? 'Remove from favorites' : 'Add to favorites'}
+                  onClick={() => toggleFavorite(entry.deviceId)}
+                >
+                  <StarIcon filled={favorites.some((a) => a.deviceId === entry.deviceId)} />
+                </button>
+                <button
+                  type="button"
+                  className="flex-1 text-left font-mono text-sm tabular-nums text-zinc-700 hover:text-brand-700"
+                  onClick={() => setDeviceId(formatDeviceId(entry.deviceId))}
+                >
+                  {formatDeviceId(entry.deviceId)}
+                </button>
+                <span className="text-xs text-zinc-400">
+                  {new Date(entry.lastConnectedAt).toLocaleDateString()}
+                </span>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={connecting}
+                  onClick={() => void connectTo(entry.deviceId, undefined)}
+                >
+                  Connect
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

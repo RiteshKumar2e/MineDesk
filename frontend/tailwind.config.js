@@ -9,20 +9,21 @@ export default {
   theme: {
     extend: {
       colors: {
-        // A deliberately-picked violet, not the default Tailwind/shadcn blue
-        // every generated admin dashboard reaches for.
+        // Warm amber, not the violet this started with - every component
+        // uses these semantic brand-* classes rather than a hardcoded
+        // color, so this one swap is what actually reskins the whole app.
         brand: {
-          50: '#f5f3ff',
-          100: '#ede9fe',
-          200: '#ddd6fe',
-          300: '#c4b5fd',
-          400: '#a78bfa',
-          500: '#8b5cf6',
-          600: '#7c3aed',
-          700: '#6d28d9',
-          800: '#5b21b6',
-          900: '#4c1d95',
-          950: '#2e1065',
+          50: '#fffbeb',
+          100: '#fef3c7',
+          200: '#fde68a',
+          300: '#fcd34d',
+          400: '#fbbf24',
+          500: '#f59e0b',
+          600: '#d97706',
+          700: '#b45309',
+          800: '#92400e',
+          900: '#78350f',
+          950: '#451a03',
         },
       },
       fontFamily: {
@@ -30,8 +31,8 @@ export default {
         display: ['Manrope', 'system-ui', 'sans-serif'],
       },
       boxShadow: {
-        card: '0 1px 2px 0 rgb(76 29 149 / 0.04), 0 1px 3px 0 rgb(76 29 149 / 0.06)',
-        popover: '0 8px 24px -4px rgb(76 29 149 / 0.12), 0 2px 8px -2px rgb(76 29 149 / 0.08)',
+        card: '0 1px 2px 0 rgb(120 53 15 / 0.04), 0 1px 3px 0 rgb(120 53 15 / 0.06)',
+        popover: '0 8px 24px -4px rgb(120 53 15 / 0.12), 0 2px 8px -2px rgb(120 53 15 / 0.08)',
       },
     },
   },
