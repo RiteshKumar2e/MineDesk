@@ -6,12 +6,18 @@
 
 FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
+# package-lock.json is deliberately NOT copied in: it's generated on whatever
+# OS a developer last ran `npm install` on (Windows, here), so it only has a
+# resolved entry for that platform's @libsql/* native binary. Installing
+# from package.json alone lets npm resolve the *actual* platform-correct
+# optional dependency (@libsql/linux-x64-musl on this Alpine image) fresh
+# every build, instead of reusing a lockfile that doesn't know musl exists.
+COPY package.json ./
 RUN npm install --omit=dev
 
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY package.json ./
 RUN npm install
 COPY tsconfig.json ./
 COPY src src

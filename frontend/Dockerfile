@@ -18,7 +18,13 @@ ARG VITE_WS_URL=ws://localhost:4000
 ENV VITE_API_URL=$VITE_API_URL
 ENV VITE_WS_URL=$VITE_WS_URL
 
-COPY package.json package-lock.json* ./
+# package-lock.json is deliberately NOT copied in: it's generated on whatever
+# OS a developer last ran `npm install` on (Windows, here), so it only has a
+# resolved entry for that platform's Rollup/esbuild native binary. Installing
+# from package.json alone lets npm resolve the platform-correct optional
+# dependency fresh every build instead of reusing a lockfile that doesn't
+# know about this image's platform.
+COPY package.json ./
 RUN npm install
 COPY . .
 RUN npm run build

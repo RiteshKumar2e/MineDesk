@@ -20,3 +20,10 @@ backend/dist/
 logs/
 *.log
 .vite/
+
+# Generated on this (Windows) dev machine - only records this platform's
+# optional native binaries (@libsql/win32-x64-msvc, Rollup's win32 build),
+# so committing it breaks installs on Linux build hosts (Render, Vercel).
+# The root lockfile is fine to keep - it has no native deps.
+backend/package-lock.json
+frontend/package-lock.json
