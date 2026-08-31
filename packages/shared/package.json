@@ -7,7 +7,8 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./ids": { "types": "./dist/ids.d.ts", "default": "./dist/ids.js" }
+    "./ids": { "types": "./dist/ids.d.ts", "default": "./dist/ids.js" },
+    "./idFormat": { "types": "./dist/idFormat.d.ts", "default": "./dist/idFormat.js" }
   },
   "files": ["dist"],
   "scripts": {

@@ -36,6 +36,17 @@ struct EnrollRequest<'a> {
     agent_version: &'a str,
 }
 
+/// Same shape as `EnrollRequest` minus `code` - see `POST /api/v1/agent/register`.
+#[derive(Debug, Serialize)]
+struct RegisterRequest<'a> {
+    hostname: &'a str,
+    os: &'a str,
+    #[serde(rename = "osVersion", skip_serializing_if = "Option::is_none")]
+    os_version: Option<&'a str>,
+    #[serde(rename = "agentVersion")]
+    agent_version: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct EnrollResponse {
     #[serde(rename = "deviceId")]
@@ -173,6 +184,25 @@ impl ApiClient {
             .send()
             .await
             .context("sending enrollment request")?;
+        Self::parse_or_error(response).await
+    }
+
+    /// The AnyDesk-style counterpart to `enroll`: no code, called by the
+    /// agent itself the first time it ever runs with no saved credential -
+    /// see `run()`'s handling of a missing `AgentConfig` in main.rs.
+    pub async fn register(&self, hostname: &str, os_version: Option<&str>) -> Result<EnrollResponse> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/agent/register", self.base_url))
+            .json(&RegisterRequest {
+                hostname,
+                os: "windows",
+                os_version,
+                agent_version: env!("CARGO_PKG_VERSION"),
+            })
+            .send()
+            .await
+            .context("sending self-registration request")?;
         Self::parse_or_error(response).await
     }
 

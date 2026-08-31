@@ -84,7 +84,11 @@ export async function registerUser(
  * discarded: nobody, including the guest, can ever log into this account
  * again, and it owns no devices.
  */
-export async function createGuestUser(displayName: string, meta: RequestMeta): Promise<User> {
+async function createDisposableUser(
+  displayName: string,
+  meta: RequestMeta,
+  action: (typeof AuditAction)[keyof typeof AuditAction],
+): Promise<User> {
   const name = displayName.trim().slice(0, 60) || 'Guest';
   const user = await prisma.user.create({
     data: {
@@ -95,12 +99,28 @@ export async function createGuestUser(displayName: string, meta: RequestMeta): P
   });
   await recordAudit({
     userId: user.id,
-    action: AuditAction.USER_GUEST_CREATED,
+    action,
     ipAddress: meta.ip,
     userAgent: meta.userAgent,
     metadata: { name },
   });
   return user;
+}
+
+export async function createGuestUser(displayName: string, meta: RequestMeta): Promise<User> {
+  return createDisposableUser(displayName, meta, AuditAction.USER_GUEST_CREATED);
+}
+
+/**
+ * The owner behind a self-registering device - see `POST /api/v1/agent/register`.
+ * Same disposable-account mechanics as `createGuestUser`, and the same reason
+ * for existing: an AnyDesk-style "just run it and get an ID" agent still
+ * needs *something* to own the resulting Device row, so that every existing
+ * permission/ownership/audit rule keeps applying to it unchanged rather than
+ * carving out a null-owner special case.
+ */
+export async function createUnattendedDeviceOwner(hostname: string, meta: RequestMeta): Promise<User> {
+  return createDisposableUser(hostname, meta, AuditAction.USER_DEVICE_OWNER_CREATED);
 }
 
 // --------------------------------------------------------------------------

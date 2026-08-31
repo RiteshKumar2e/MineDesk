@@ -1,13 +1,17 @@
 import { randomBytes, randomInt } from 'node:crypto';
 
 /**
- * Human-facing identifiers.
+ * Server-only ID/secret generators - anything needing `node:crypto` lives
+ * here, never in idFormat.ts (see that file's doc comment for why the split
+ * matters: a browser bundle fails to build if it even references one of
+ * these functions, whether or not it actually calls it).
  *
  * Device IDs are read aloud over the phone during support calls, so they use a
  * Crockford-style alphabet with the visually ambiguous characters removed
- * (no I, L, O, U, 0, 1). They are opaque: an ID reveals nothing about the
- * owner and cannot be enumerated, and possession of one grants nothing on its
- * own - authorization is always checked server-side.
+ * (no I, L, O, U, 0, 1) for the codes that still use letters. They are opaque:
+ * an ID reveals nothing about the owner and cannot be enumerated, and
+ * possession of one grants nothing on its own - authorization is always
+ * checked server-side.
  */
 const SAFE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTVWXYZ';
 
@@ -23,9 +27,19 @@ function randomChars(length: number): string {
   return out.length === length ? out : out + randomChars(length - out.length);
 }
 
-/** e.g. RMT-8F32-A91C */
+/**
+ * e.g. 552246274 - a bare 9-digit number, deliberately the same shape as
+ * AnyDesk's own "Your Address": something you can read aloud over the phone
+ * or type from memory, with no letters to spell out and no fixed prefix
+ * marking it as belonging to this platform specifically. This is what makes
+ * the no-login Quick Connect front door (see createGuestUser on the API
+ * side) actually approachable - a stranger is asked to type a phone-number-
+ * shaped string, not a support-ticket-shaped one.
+ */
 export function generateDeviceId(): string {
-  return `RMT-${randomChars(4)}-${randomChars(4)}`;
+  let out = '';
+  for (let i = 0; i < 9; i++) out += String(randomInt(0, 10));
+  return out;
 }
 
 /** e.g. ENR-4K2P-9XQ7 - single use, short lived, exchanged for agent credentials. */
@@ -61,17 +75,8 @@ export function randomNumericCode(digits = 6): string {
   return out;
 }
 
-export const DEVICE_ID_PATTERN = /^RMT-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
-export const ENROLLMENT_CODE_PATTERN = /^ENR-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
-export const SESSION_ID_PATTERN = /^SES-\d{4}-[0-9A-F]{7}$/;
-
-export const isDeviceId = (value: string): boolean => DEVICE_ID_PATTERN.test(value);
-export const isEnrollmentCode = (value: string): boolean => ENROLLMENT_CODE_PATTERN.test(value);
-export const isSessionId = (value: string): boolean => SESSION_ID_PATTERN.test(value);
-
-/** Normalizes user input: strips spaces, upper-cases, re-inserts dashes. */
-export function normalizeCode(input: string): string {
-  const cleaned = input.trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
-  const m = /^(RMT|ENR)(.{4})(.{4})$/.exec(cleaned);
-  return m ? `${m[1]}-${m[2]}-${m[3]}` : input.trim().toUpperCase();
-}
+// Re-exported for backward compatibility: every existing server-side import
+// of these from '@minedesk/shared/ids' keeps working unchanged. New
+// client-safe (browser-bundle-safe) code should import from
+// '@minedesk/shared/idFormat' directly instead - see that file's doc comment.
+export * from './idFormat.js';

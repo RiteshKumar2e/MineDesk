@@ -1,6 +1,7 @@
-import { AUDIT_LABELS } from '@minedesk/protocol';
+import { AUDIT_LABELS, AuditAction } from '@minedesk/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { auditRequestContext, recordAudit } from '../../lib/audit.js';
 import { parseJsonObject } from '../../lib/json.js';
 import { prisma } from '../../lib/prisma.js';
 
@@ -51,6 +52,27 @@ export async function auditRoutes(app: FastifyInstance): Promise<void> {
       })),
       nextCursor: entries.length === query.limit ? entries[entries.length - 1]?.createdAt.toISOString() : null,
     });
+  });
+
+  /**
+   * Clear this account's activity history.
+   *
+   * Deliberately not a silent wipe: a security audit log that anyone
+   * (including its own owner) can erase without a trace stops being an audit
+   * log, so this leaves exactly one row behind - the fact that a clear
+   * happened, when, and from where. That is the same trade-off browsers make
+   * with "clear history": the record of *that specific action* is what a
+   * compromised-account investigation would actually need.
+   */
+  app.delete('/', async (request, reply) => {
+    const { count } = await prisma.auditLog.deleteMany({ where: { userId: request.user!.id } });
+    await recordAudit({
+      userId: request.user!.id,
+      action: AuditAction.ACTIVITY_LOG_CLEARED,
+      ...auditRequestContext(request),
+      metadata: { clearedCount: count },
+    });
+    return reply.send({ ok: true, clearedCount: count });
   });
 
   /** Distinct action names present in this account's history, for the filter UI. */

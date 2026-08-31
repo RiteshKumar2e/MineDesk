@@ -1,4 +1,5 @@
 import { CAPABILITY_DESCRIPTIONS, CAPABILITY_GROUPS, CAPABILITY_LABELS, formatDuration } from '@minedesk/shared';
+import { formatDeviceId } from '@minedesk/shared/idFormat';
 import type { Capability } from '@minedesk/types';
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -191,7 +192,7 @@ export default function DeviceDetailPage() {
             )}
           </div>
           <div className="mt-1 text-sm text-zinc-500 ">
-            ID: {device.deviceId} &middot; <span className="capitalize">{device.os}</span>
+            ID: {formatDeviceId(device.deviceId)} &middot; <span className="capitalize">{device.os}</span>
             {device.osVersion ? ` ${device.osVersion}` : ''}
           </div>
         </div>

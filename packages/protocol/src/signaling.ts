@@ -14,7 +14,7 @@ import { z } from 'zod';
 export const PROTOCOL_VERSION = 1;
 
 export const SESSION_ID_PATTERN = /^SES-\d{4}-[0-9A-F]{7}$/;
-export const DEVICE_ID_PATTERN = /^RMT-[0-9A-Z]{4}-[0-9A-Z]{4}$/;
+export const DEVICE_ID_PATTERN = /^\d{9}$/;
 
 const sessionId = z.string().regex(SESSION_ID_PATTERN, 'invalid session id');
 

@@ -15,19 +15,26 @@ import { asStringArray } from '../../lib/json.js';
 import { markDeviceOffline, refreshPresence } from '../../lib/presence.js';
 import { prisma } from '../../lib/prisma.js';
 import { signAgentToken } from '../../lib/tokens.js';
+import { createUnattendedDeviceOwner } from '../../modules/auth/service.js';
 import { STRICT_LIMITS } from '../../plugins/security.js';
-import { agentAuthSchema, enrollSchema } from '../devices/schemas.js';
-import { permissionsOf } from '../devices/service.js';
+import { agentAuthSchema, enrollSchema, selfRegisterSchema } from '../devices/schemas.js';
+import { allocateDeviceId, permissionsOf } from '../devices/service.js';
 
 /**
- * Endpoints the Remote Agent calls. Two of them are unauthenticated by
- * necessity - they are how an agent obtains credentials in the first place -
- * so both are rate limited and both consume a secret the caller must already
- * possess (an enrollment code, or the agent secret).
+ * Endpoints the Remote Agent calls. Most are unauthenticated by necessity -
+ * they are how an agent obtains credentials in the first place - so all of
+ * them are rate limited and the two that grant a device credential each
+ * consume something the caller must already possess (an enrollment code, the
+ * agent secret) or take the one-time hit of minting a disposable owner
+ * (self-register).
  *
- * Nothing here creates a device. A device only exists because a signed-in owner
- * created it in the dashboard; enrollment binds an agent to a device that is
- * already waiting for one.
+ * /enroll binds an agent to a device a signed-in owner already created in
+ * the dashboard. /register does the AnyDesk-style opposite: no dashboard, no
+ * account, no code - running the agent with nothing configured yet is itself
+ * the registration, exactly like launching AnyDesk for the first time and
+ * immediately being handed an address. See createUnattendedDeviceOwner's
+ * comment for why that still produces a normal, ordinary owner, not a
+ * special-cased ownerless device.
  */
 export async function agentRoutes(app: FastifyInstance): Promise<void> {
   // ---------------------------------------------------------------- enroll
@@ -80,6 +87,54 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     });
 
     // The secret is returned exactly once. Only its Argon2 hash is stored.
+    return reply.status(201).send({
+      deviceId: device.deviceId,
+      deviceName: device.name,
+      agentSecret: secret,
+      permissions: permissionsOf(device.permissions),
+      signalUrl: `${env.API_PUBLIC_URL.replace(/^http/, 'ws')}/signal`,
+      heartbeatIntervalMs: env.AGENT_HEARTBEAT_INTERVAL_MS,
+    });
+  });
+
+  // ----------------------------------------------------------------- register
+  // The no-account counterpart to /enroll: called by the agent itself, once,
+  // the first time it ever runs with no saved credential - see this file's
+  // module doc comment.
+  app.post('/register', { config: { rateLimit: STRICT_LIMITS.enroll } }, async (request, reply) => {
+    const input = selfRegisterSchema.parse(request.body);
+    const { ipAddress, userAgent } = auditRequestContext(request);
+
+    const owner = await createUnattendedDeviceOwner(input.hostname, { ip: ipAddress, userAgent });
+    const deviceId = await allocateDeviceId();
+    const secret = generateAgentSecret();
+    const secretHash = await hashPassword(secret);
+
+    const device = await prisma.device.create({
+      data: {
+        deviceId,
+        userId: owner.id,
+        name: input.hostname,
+        hostname: input.hostname,
+        os: input.os,
+        osVersion: input.osVersion ?? null,
+        agentVersion: input.agentVersion ?? null,
+        agentSecretHash: secretHash,
+        enrolledAt: new Date(),
+        permissions: { create: {} },
+      },
+      include: { permissions: true },
+    });
+
+    await recordAudit({
+      userId: owner.id,
+      deviceId: device.id,
+      action: AuditAction.DEVICE_ENROLLED,
+      ipAddress,
+      userAgent,
+      metadata: { hostname: input.hostname, os: input.os, agentVersion: input.agentVersion, selfRegistered: true },
+    });
+
     return reply.status(201).send({
       deviceId: device.deviceId,
       deviceName: device.name,

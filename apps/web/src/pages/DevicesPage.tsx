@@ -1,3 +1,4 @@
+import { formatDeviceId, normalizeCode } from '@minedesk/shared/idFormat';
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { StatusDot } from '../components/StatusDot';
@@ -38,7 +39,7 @@ export default function DevicesPage() {
     setConnectError(null);
     try {
       const res = await createSession.mutateAsync({
-        deviceId: connectId.trim().toUpperCase(),
+        deviceId: normalizeCode(connectId),
         unattendedPassword: connectPassword || undefined,
       });
       navigate(`/remote/${res.sessionId}`);
@@ -84,8 +85,9 @@ export default function DevicesPage() {
               </label>
               <input
                 id="connect-id"
-                className="input font-mono uppercase"
-                placeholder="RMT-XXXX-XXXX"
+                className="input font-mono"
+                placeholder="552 246 274"
+                inputMode="numeric"
                 required
                 value={connectId}
                 onChange={(e) => setConnectId(e.target.value)}
@@ -205,7 +207,7 @@ export default function DevicesPage() {
               <span className="font-medium">{device.name}</span>
             </div>
             <div className="space-y-0.5 text-xs text-zinc-500 ">
-              <div>ID: {device.deviceId}</div>
+              <div>ID: {formatDeviceId(device.deviceId)}</div>
               <div className="capitalize">{device.os}</div>
               <div>
                 {device.status === 'online'

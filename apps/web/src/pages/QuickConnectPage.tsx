@@ -1,3 +1,4 @@
+import { normalizeCode } from '@minedesk/shared/idFormat';
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ErrorNotice } from '../components/AuthShell';
@@ -30,7 +31,7 @@ export default function QuickConnectPage() {
     try {
       await guestConnect(name);
       const res = await createSession.mutateAsync({
-        deviceId: deviceId.trim().toUpperCase(),
+        deviceId: normalizeCode(deviceId),
         unattendedPassword: password || undefined,
       });
       navigate(`/remote/${res.sessionId}`);
@@ -67,8 +68,9 @@ export default function QuickConnectPage() {
               </label>
               <input
                 id="qc-device-id"
-                className="input font-mono text-lg uppercase tracking-wide"
-                placeholder="RMT-XXXX-XXXX"
+                className="input font-mono text-lg tracking-wide"
+                placeholder="552 246 274"
+                inputMode="numeric"
                 autoFocus
                 required
                 value={deviceId}

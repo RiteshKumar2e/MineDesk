@@ -70,8 +70,12 @@ enum Command {
     },
     /// Run the agent using a previously saved enrollment. This is also the
     /// default when no subcommand is given, so a service manager can just
-    /// invoke the binary directly.
-    Run,
+    /// invoke the binary directly. With no saved enrollment yet, this
+    /// self-registers instead of failing - see `run`'s doc comment.
+    Run {
+        #[arg(long, default_value = "https://api.minedesk.example.com", env = "MINEDESK_API_URL")]
+        api_url: String,
+    },
 }
 
 #[tokio::main]
@@ -81,9 +85,11 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Command::Run) {
+    match cli.command.unwrap_or(Command::Run {
+        api_url: std::env::var("MINEDESK_API_URL").unwrap_or_else(|_| "https://api.minedesk.example.com".to_string()),
+    }) {
         Command::Enroll { code, api_url } => enroll(&code, &api_url).await,
-        Command::Run => run().await,
+        Command::Run { api_url } => run(&api_url).await,
     }
 }
 
@@ -97,12 +103,7 @@ async fn enroll(code: &str, api_url: &str) -> Result<()> {
         .await
         .context("enrollment failed")?;
 
-    let config = AgentConfig {
-        device_id: response.device_id.clone(),
-        agent_secret: response.agent_secret,
-        api_url: api_url.to_string(),
-    };
-    config.save().context("saving agent configuration")?;
+    save_enrollment(api_url, &response)?;
 
     println!();
     println!("Enrolled successfully.");
@@ -112,6 +113,47 @@ async fn enroll(code: &str, api_url: &str) -> Result<()> {
     println!();
     println!("Run `minedesk-agent run` (or just `minedesk-agent`) to start the agent.");
     Ok(())
+}
+
+/// The AnyDesk-style front door: running the agent with nothing configured
+/// yet does not fail with "run enroll first" - it registers itself, once,
+/// and is immediately reachable by its new ID with no dashboard, no
+/// account, no code, exactly like launching AnyDesk for the first time.
+/// The dashboard-issued enrollment code above still exists for someone who
+/// wants a *named*, account-owned device from the start; this is for
+/// everyone else.
+async fn self_register(api_url: &str) -> Result<AgentConfig> {
+    let client = api::ApiClient::new(api_url);
+    let hostname = hostname()?;
+
+    println!("No enrollment found - registering \"{hostname}\" as a new device...");
+    let response = client
+        .register(&hostname, os_version().as_deref())
+        .await
+        .context("self-registration failed")?;
+
+    let config = save_enrollment(api_url, &response)?;
+
+    println!();
+    println!("Registered. No account was needed - this device now has its own permanent ID:");
+    println!();
+    println!("  {}", response.device_id);
+    println!();
+    println!("Share it with anyone who needs to connect. Each request still needs your");
+    println!("approval here unless you turn on unattended access from the dashboard.");
+    println!("  Config file: {}", AgentConfig::path().display());
+    println!();
+    Ok(config)
+}
+
+fn save_enrollment(api_url: &str, response: &api::EnrollResponse) -> Result<AgentConfig> {
+    let config = AgentConfig {
+        device_id: response.device_id.clone(),
+        agent_secret: response.agent_secret.clone(),
+        api_url: api_url.to_string(),
+    };
+    config.save().context("saving agent configuration")?;
+    Ok(config)
 }
 
 fn hostname() -> Result<String> {
@@ -179,10 +221,10 @@ async fn reconnect_signaling(
     None
 }
 
-async fn run() -> Result<()> {
-    let Some(config) = AgentConfig::load().context("loading agent configuration")? else {
-        eprintln!("No enrollment found. Run:\n  minedesk-agent enroll --code ENR-XXXX-XXXX");
-        std::process::exit(1);
+async fn run(api_url: &str) -> Result<()> {
+    let config = match AgentConfig::load().context("loading agent configuration")? {
+        Some(config) => config,
+        None => self_register(api_url).await?,
     };
 
     let client = api::ApiClient::new(&config.api_url);

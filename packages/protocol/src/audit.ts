@@ -6,6 +6,7 @@
 export const AuditAction = {
   USER_REGISTERED: 'user.registered',
   USER_GUEST_CREATED: 'user.guest_created',
+  USER_DEVICE_OWNER_CREATED: 'user.device_owner_created',
   USER_LOGIN: 'user.login',
   USER_LOGIN_FAILED: 'user.login_failed',
   USER_LOGOUT: 'user.logout',
@@ -17,6 +18,8 @@ export const AuditAction = {
   USER_2FA_DISABLED: 'user.two_factor_disabled',
   AUTH_SESSION_REVOKED: 'auth.session_revoked',
   AUTH_TOKEN_REUSE_DETECTED: 'auth.token_reuse_detected',
+  // The one entry that survives a "clear activity" - see DELETE /api/v1/audit.
+  ACTIVITY_LOG_CLEARED: 'activity.log_cleared',
 
   DEVICE_CREATED: 'device.created',
   DEVICE_ENROLLED: 'device.enrolled',
@@ -62,6 +65,7 @@ export type AuditAction = (typeof AuditAction)[keyof typeof AuditAction];
 export const AUDIT_LABELS: Record<string, string> = {
   'user.registered': 'Account created',
   'user.guest_created': 'Guest connection started',
+  'user.device_owner_created': 'Device self-registered (no account)',
   'user.login': 'Signed in',
   'user.login_failed': 'Failed sign-in attempt',
   'user.logout': 'Signed out',
@@ -73,6 +77,7 @@ export const AUDIT_LABELS: Record<string, string> = {
   'user.two_factor_disabled': 'Two-factor authentication disabled',
   'auth.session_revoked': 'Sign-in session revoked',
   'auth.token_reuse_detected': 'Refresh token reuse detected',
+  'activity.log_cleared': 'Activity log cleared',
   'device.created': 'Device added',
   'device.enrolled': 'Agent enrolled',
   'device.renamed': 'Device renamed',

@@ -75,6 +75,14 @@ export const enrollSchema = z.object({
   agentVersion: z.string().trim().max(32).optional(),
 });
 
+/** Same shape as enrollSchema, minus the code - see POST /api/v1/agent/register. */
+export const selfRegisterSchema = z.object({
+  hostname: z.string().trim().min(1).max(128),
+  os: z.enum(['windows', 'macos', 'linux', 'unknown']).default('unknown'),
+  osVersion: z.string().trim().max(64).optional(),
+  agentVersion: z.string().trim().max(32).optional(),
+});
+
 export const agentAuthSchema = z.object({
   deviceId: z.string().trim().min(6).max(32),
   secret: z.string().min(20).max(200),

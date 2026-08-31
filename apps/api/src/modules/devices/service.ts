@@ -135,7 +135,7 @@ export async function createDevice(
 }
 
 /** Device IDs are random, so a collision is vanishingly unlikely but not impossible. */
-async function allocateDeviceId(): Promise<string> {
+export async function allocateDeviceId(): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = generateDeviceId();
     const clash = await prisma.device.findUnique({ where: { deviceId: candidate }, select: { id: true } });
