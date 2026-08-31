@@ -1,403 +1,96 @@
 # MineDesk
 
-A legitimate, self-hosted remote-support/remote-desktop platform: an authenticated
-user connects to a computer through the browser once a Remote Agent has been
-explicitly installed and authorized on that machine. Inspired by tools like
-AnyDesk, built from scratch with its own branding, backend and agent.
+A self-hosted remote-support / remote-desktop platform, in the spirit of
+AnyDesk, built from scratch with its own backend, browser client and Windows
+agent.
 
 No hidden access, no stealth persistence, no credential theft or keylogging,
-no bypass of OS privacy permissions. Camera, microphone, screen, files and
-remote control all require explicit, revocable authorization, and the person
-at the remote machine always sees a visible indicator and a way to disconnect.
+no bypass of OS privacy permissions. Screen, input, clipboard, files, audio
+and camera/microphone each require explicit, revocable authorization, and the
+person at the remote machine always sees a visible indicator and a way to
+disconnect.
 
-This repository is being built in phases (see [Roadmap](#roadmap)). **Phases
-1 through 6 are in this commit**: Foundation/Authentication/Device
-Registration, Remote Agent + WebRTC screen/input streaming, clipboard sync +
-remote audio + file transfer, camera/microphone with a live consent prompt
-and an always-on indicator, a real unattended-access password plus genuine
-access history, and now the invite race fixed plus signaling reconnect and
-ICE restart. The Rust agent has since been compiled and verified against a
-real toolchain: `cargo check`, `cargo build`, and `cargo build --release`
-all succeed and produce a working `minedesk-agent.exe` - see
-[Phase 2 status](#phase-2-status) below for exactly what that verification
-did and did not cover before relying on it; that section covers every later
-phase's agent-side additions too.
+**Live**: [minedesk.vercel.app](https://minedesk.vercel.app) (frontend) ·
+`https://minedesk.onrender.com` (API)
 
-## Architecture at a glance
+## What it does
+
+- **Instant browser connect** - open the site and you get a random 9-digit
+  address for that tab (like AnyDesk's "Your Address"), shareable so someone
+  else can view your screen with no account and no install. The address dies
+  with the tab; nothing persists server-side once the WebSocket closes.
+- **Account + managed devices** - registered users can install the Windows
+  agent on a machine, name it, and get a stable device ID they can connect to
+  any time (online/offline, unattended access, permissions, activity/audit
+  history), the same way AnyDesk's "This Desk" flow works.
+- **Full remote control from the agent** - screen video, mouse/keyboard
+  input, clipboard sync, file transfer, remote audio, and camera/microphone
+  (each independently permission-gated and consent-prompted). A pure browser
+  connection (no agent installed) is intentionally **view-only** - a web page
+  cannot inject OS-level input or read another machine's clipboard/files, so
+  full control always requires the agent.
+- **Everything else you'd expect**: 2FA, session management, unattended
+  access passwords with lockout, per-device permission masks, and a full
+  audit trail.
+
+## Architecture
 
 ```
-Browser (React) --HTTPS--> API (Fastify) --> SQLite/Turso (source of truth)
+Browser (React) --HTTPS--> API (Fastify) --> Turso (libSQL) - source of truth
        |                        |
        |WSS /signal             +--> in-process store (presence, rate limits)
        v                        |
-Remote Agent (Phase 2+) <-------+
+Remote Agent (Rust, Windows) <--+
        \                       /
         \--- WebRTC media ----/   (peer-to-peer, TURN relay as fallback)
 ```
 
 - **Control plane** (`backend`, HTTPS/JSON): identity, devices, permissions,
-  sessions, audit. Stateless - any replica can serve any request.
+  sessions, audit. Runs as a single instance - presence, signaling and rate
+  limiting live in the API's own process memory (`backend/src/lib/store.ts`),
+  not a shared cache like Redis. See that file for what would need to come
+  back if this ever needs to scale horizontally.
 - **Signaling plane** (`/signal`, WebSocket): a thin authenticated router for
   SDP/ICE/session-control frames. It never touches media.
-- **Media plane** (WebRTC, from Phase 2 on): screen video, audio, camera/mic,
-  input and file transfer, encrypted end-to-end with DTLS-SRTP between the
-  browser and the agent.
-
-See the accompanying design discussion in the project history for the full
-rationale (why each technology was chosen, the signaling handshake, the
-security boundaries, and the camera/microphone consent flow).
+- **Media plane** (WebRTC): screen video, audio, camera/mic, input and file
+  transfer, encrypted end-to-end with DTLS-SRTP directly between the browser
+  and the agent (or two browser tabs, for view-only connections).
 
 ## Project structure
 
 Two standalone, independently deployable projects - no npm workspaces, no
-shared package to build first. `frontend/` and `backend/` each vendor their
-own copy of the small amount of code both sides need (types, wire protocol,
-id/permission helpers) under `src/vendor/`, kept in sync by hand.
+shared package to build first. Each vendors its own copy of the small amount
+of code both sides need (types, wire protocol, permission defaults) under
+`src/vendor/`, kept in sync by hand.
 
 ```
 frontend/
-  src/         React + Vite + Tailwind dashboard
+  src/         React + Vite + Tailwind web client
   src/vendor/  types, protocol, shared - vendored copy (see backend/'s)
   Dockerfile   standalone nginx static build (optional; Vercel is primary)
   vercel.json  SPA rewrite rule
 backend/
-  src/              Fastify + TypeScript backend (auth, devices, signaling, audit)
-  src/vendor/       types, protocol, shared - vendored copy (see frontend/'s)
-  db/               schema.sql (hand-written, no ORM/migration engine) + dev.db
-  agent/            Windows Remote Agent (Rust) - built and served by this API
-  agent/rust-env.ps1  dev-machine Rust/MSVC toolchain setup (see RUN.md)
-  infrastructure/   coturn (TURN server) config, optional single-host nginx config
-  Dockerfile        standalone image (Render/Fly.io)
-  fly.toml          Fly.io config
-docker-compose.yml
+  src/            Fastify + TypeScript API (auth, devices, signaling, audit)
+  src/vendor/     types, protocol, shared - vendored copy (see frontend/'s)
+  db/             schema.sql (hand-written, no ORM/migration engine) + dev.db
+  agent/          Windows Remote Agent (Rust) - see backend/agent/README.md
+  infrastructure/ coturn (TURN server) config, optional single-host nginx config
+  Dockerfile      standalone image (Render/Fly.io)
+  fly.toml        Fly.io config
+docker-compose.yml  optional local coturn container
 ```
-
-## What's implemented in Phase 1
-
-**Authentication**
-- Registration, login, logout, logout-everywhere
-- Argon2id password hashing (never plaintext, never reversible)
-- Short-lived JWT access tokens (10 min) + opaque refresh tokens in an
-  httpOnly cookie, rotated on every use with **reuse detection** (a replayed
-  refresh token revokes the whole session)
-- Email verification and password reset (console-logged emails in dev; SMTP
-  in production)
-- TOTP two-factor authentication with backup codes
-- Per-browser session listing and remote revocation
-- Account lockout after repeated failed logins
-- In-process rate limiting (correct for the current single-instance deployment)
-
-**Device registration**
-- Owner creates a device in the dashboard → gets a one-time enrollment code
-- Agent exchanges the code for a device-scoped credential and a 9-digit
-  device id (AnyDesk-style, e.g. `261 967 268`)
-- Device-scoped JWTs, separate signing key from user tokens
-- Presence via an in-process TTL entry refreshed by heartbeat (crash-safe: a
-  restart cannot leave a device stuck "online" - the TTL just lapses)
-- Per-device permission mask (screen/mouse/keyboard/clipboard/files/
-  audio/camera/microphone), enforced server-side and meant to be re-checked
-  by the agent
-- Unattended access (opt-in, requires a password), revocation, enrollment
-  code rotation
-- Full audit trail for every security-relevant action
-
-## What's implemented in Phase 2
-
-**Session creation and signaling**
-- `POST /api/v1/sessions` - the owner requests a connection to their own
-  device; checks ownership, presence, no session already in flight, and that
-  the device has at least one capability enabled, then snapshots the current
-  permission mask onto the session (later permission edits don't retroactively
-  widen or narrow a session already in progress)
-- The signaling relay (built in Phase 1) now persists `session:accept` /
-  `session:deny` into the `RemoteSession` row and audit log, not just relaying
-  them
-
-**Browser (`/remote/:sessionId`)**
-- Opens the signaling socket, joins the session, handles the offer/answer/ICE
-  exchange, renders the incoming video track, and maps clicks accurately even
-  when the video is letterboxed (`object-fit: contain`)
-- Sends mouse/keyboard/wheel input over two WebRTC DataChannels - an
-  unreliable/unordered one for mouse-move, reliable/ordered for everything
-  else - using the vendored protocol input schema shared with the agent
-- Disconnect button, a Ctrl+Alt+Del button, and status states for connecting/
-  waiting-for-approval/active/reconnecting/denied/ended/failed
-
-**Remote Agent** (`backend/agent`, Rust, Windows) - see
-[Phase 2 status](#phase-2-status) for how much of this is compiler-verified:
-- `minedesk-agent enroll --code ...` exchanges a one-time code for a device
-  credential, stored at `%ProgramData%\MineDesk\agent.toml`
-- Connects to `/signal`, heartbeats, and re-fetches its permission mask on
-  every heartbeat while idle
-- On an incoming session: joins it on the signaling channel, then either
-  auto-accepts (unattended access enabled) or prints a console prompt
-  ("Accept? [y/N]", 30s to respond) - either way, the capability list from the
-  invite is intersected with the agent's own last-fetched permission mask
-  before anything is authorized, so neither side alone can widen access
-- Captures the primary display via DXGI Desktop Duplication, encodes it to
-  H.264 (OpenH264, software, ~15 fps), and streams it as the offering peer's
-  video track
-- Injects mouse and keyboard input via `SendInput`, permission-checked per
-  message against the session's capability set (not just at connect time)
-- Ctrl+Alt+Del is attempted via the real Secure Attention Sequence
-  (`SendSAS`), not synthesized key events - see the known limitation below
-  about what deploying that actually requires
-- Typing `d` + Enter disconnects the current session locally; `q` + Enter or
-  Ctrl+C shuts the agent down cleanly, ending any session and telling the API
-  the device is going offline
-
-**Not yet implemented** (later phases, per the task's phased plan):
-camera/microphone, a native tray/window agent UI (console output stands in
-for it this phase), multi-monitor selection, and reconnection/ICE-restart
-after a network interruption.
-
-## What's implemented in Phase 3
-
-**Clipboard sync** - permission-gated like every other capability, carried
-over the same reliable DataChannel as keyboard/mouse (see
-`backend/src/vendor/protocol/datachannel.ts`'s `ClipboardText` message):
-- Controller to remote: Ctrl+V over the remote view sends the pasted text
-  directly (the native `paste` event, no permission prompt); a "Send
-  clipboard" button covers the case where a bare paste event doesn't fire
-- Remote to controller: the agent polls its local clipboard (`arboard`, every
-  750ms - see the known limitation below) and pushes a change to the
-  browser, which tries to write it to the OS clipboard automatically and
-  always shows a "click to copy" fallback toast, since browsers don't let a
-  page silently write to the clipboard outside a user gesture in every context
-
-**Remote audio** - the agent adds an Opus-encoded audio track (WASAPI
-loopback capture of whatever the machine is playing) to the same peer
-connection as the video track; the browser plays it through the existing
-`<video>` element and exposes mute + a volume slider, both gated behind the
-`audio` capability
-
-**File transfer** - a dedicated `md-files` DataChannel, one transfer at a
-time per session (see the protocol doc comment in
-`backend/src/vendor/protocol/filetransfer.ts` for why):
-- Owner configures one or more shared folders per device (new UI on the
-  device detail page); the file manager panel in `/remote/:sessionId`
-  browses them, with upload/download/rename/delete/new-folder gated
-  individually behind `fileUpload`/`fileDownload`/`fileDelete`
-- Progress, speed and ETA shown for the active transfer, with cancel; uploads
-  use `RTCDataChannel.bufferedAmount` for backpressure so a large file
-  doesn't get buffered wholesale in browser memory before the channel can
-  actually send it
-- Every path is validated on the agent by a Rust port of
-  `backend/src/vendor/shared/paths.ts`'s traversal guard (`backend/agent/src/paths.rs`)
-  before any filesystem call - the same rule set, hand-mirrored the same way
-  the wire protocol is
-
-**Not yet implemented as of Phase 3**: camera/microphone, addressed below.
-
-## What's implemented in Phase 4
-
-**Camera and microphone**, each gated by two independent checks before
-anything opens - the owner's permission mask (`camera`/`microphone` in
-`DevicePermission`, off by default) *and* a live, per-session approval by
-whoever is at the remote machine:
-
-- Controller clicks "Request Camera" (or Microphone) in `/remote/:sessionId`,
-  which sends `capability:request` over the *signaling* socket (not a data
-  channel - this negotiation predates there being any media to carry)
-- The agent prints "The controller is requesting your CAMERA. Allow? [y/N]"
-  at the console, with the same 30-second-then-deny behavior as a session
-  invite; there is no code path that grants either capability without this
-  prompt, and no default-allow
-- On approval, the agent opens the device (real camera/microphone access
-  through the same OS capture APIs any other application would use - the
-  hardware privacy light and Windows' in-use indicator behave exactly as
-  they would for a video-call app), adds a new track to the *existing*
-  peer connection, and renegotiates - the browser's already-in-place
-  `webrtc:offer` handling from Phase 2 needed no changes to support this
-- The browser shows a small preview panel with a `\u{1F534}` "Camera Active"
-  and/or "Microphone Active" label the entire time either is active - not a
-  one-time toast, and not something the controller can dismiss out from
-  under the indicator - plus a "Stop" button that sends a new
-  `capability:revoke` message
-- The person at the remote machine can independently stop either at any time
-  by typing `c` or `m` at the agent's console, which reaches the browser as a
-  `capability:state` broadcast - the same message a controller-initiated stop
-  produces, so the UI can't tell (and doesn't need to tell) who stopped it
-
-**Not yet implemented**: a native tray/notification-window indicator (console
-output stands in, as documented since Phase 2), device selection when more
-than one camera/microphone exists, and actually removing the WebRTC track on
-stop rather than just halting capture - see `backend/agent/README.md`'s Known
-Limitations for the reasoning on that last one.
-
-## What's implemented in Phase 5
-
-This phase is mostly about closing gaps left open by earlier ones rather than
-adding new surface area - notably, the unattended-access password did not
-actually gate anything until now, and several `RemoteSession` columns had
-been in the schema since Phase 1 without anything ever writing to them.
-
-**Unattended access now actually authorizes non-owners.** Previously,
-`POST /api/v1/sessions` only ever checked that the caller owned the device -
-the stored `unattendedPasswordHash` was set by the UI but never verified
-anywhere, so there was no way for anyone but the owner to connect regardless
-of the password. Now:
-- The device owner can always connect with no password, exactly as before
-- Anyone else who is an authenticated MineDesk user can connect if
-  `unattendedAccessEnabled` is on and they supply the correct password -
-  this is what "share this password with a colleague" is supposed to mean,
-  and it now does something
-- Wrong attempts are rate-limited and rejected with the same error whether
-  the reason is "wrong password" or "unattended access is off," so this
-  endpoint cannot be used to probe a device's configuration; five wrong
-  attempts locks the *device* (not the caller's account - a different caller
-  trying next should not get a fresh budget) for 15 minutes, tracked
-  in-process the same way presence and rate limiting are
-- A new **"Connect to a device"** flow on `/devices` lets any signed-in user
-  enter a device ID and password directly, separate from "Add device" (which
-  enrolls a new agent under *your* account)
-
-**Access history is now real**, not placeholder. `usedCamera`,
-`usedMicrophone`, `usedAudio`, `usedClipboard`, `usedFiles` and
-`connectionType` existed as columns since Phase 1 but nothing ever set them,
-because none of that activity is visible to the API - it all happens over
-peer-to-peer WebRTC. The browser now reports it explicitly via
-`PATCH /api/v1/sessions/:sessionId/activity` (each `used*` flag is a
-one-way latch - the endpoint can only ever set one to true, never back to
-false) at the moments that information becomes available: `connectionType`
-by inspecting `RTCPeerConnection.getStats()` for the selected candidate
-pair's type once ICE connects, and each `used*` flag the first time that
-capability is actually exercised. The device detail page's session list
-shows all of it - duration, connection type, unattended vs. interactive, and
-which capabilities were used, per session.
-- Non-owner connections now show up under **"Connected via access
-  password"** on the device page, computed from real session history
-  grouped by user - not a membership table (full multi-user sharing with
-  named roles is still a later addition), but real visibility into who has
-  actually used the password, which is the security-relevant question in
-  the meantime.
-
-**Not yet implemented**: full multi-user device sharing (inviting a specific
-person by email, assigning them a role, revoking just them rather than
-rotating the shared password), and a persistent (DB-backed, not
-in-process-only) record of unattended-lockout events.
-
-## What's implemented in Phase 6
-
-This phase closes the invite race documented (until now) in
-[Phase 2 status](#phase-2-status) below, and adds reconnection/ICE-restart -
-the two concrete, code-level items from this phase's original scope.
-Ephemeral TURN credentials have existed since Phase 1. Horizontal scaling is
-explicitly *not* a goal right now: presence, signaling and rate limiting
-live in the API's own process memory (`backend/src/lib/store.ts`), correct
-for - and simpler to deploy as - a single instance; see that file's comment
-for what would need to come back if that ever changes. See
-[Deployment](#deployment) for what's left there, which is
-infrastructure rather than application code.
-
-**The invite race is fixed.** A new server-only signaling message,
-`session:ready`, is published to a session's channel the moment the
-*controller's* `session:join` is processed - which the agent, already
-subscribed to that channel since the moment it received the invite, is
-guaranteed to see. The agent no longer generates its offer immediately on
-accept; it waits for `session:ready` (immediately, if that arrives first -
-the ordinary case for a non-unattended prompt, since a human typically takes
-much longer than 30 seconds to answer than the browser takes to connect and
-join) before ever publishing anything to the session channel. This makes the
-race structurally impossible rather than merely unlikely: the agent cannot
-publish to a channel it hasn't confirmed has a listener on.
-
-**Reconnection.** A dropped signaling WebSocket no longer ends the agent
-process or any session in progress - `backend/agent/README.md`'s Known
-Limitations previously called this out explicitly; see that file for what's
-still not covered (a session still awaiting approval when signaling drops
-does not resume automatically). WebRTC media runs over its own sockets
-independent of this WebSocket, so an active call is worth preserving through
-a reconnect attempt (re-authenticate, reconnect, backoff up to ~5 minutes)
-rather than torn down on the first blip.
-
-**ICE restart.** Two triggers, one mechanism (`session.rs`'s
-`perform_ice_restart`, shared so there is exactly one implementation to get
-right): a successful signaling reconnect proactively restarts ICE on any
-active session (a dropped signaling connection is itself a reasonable signal
-the network changed), and the peer connection independently watches its own
-ICE state, restarting after an 8-second grace period if a `disconnected`/
-`failed` state doesn't clear on its own first. The browser's existing offer
-handling needed no changes to receive either kind of restart - applying a
-renegotiated remote description is the same code path whether or not it
-happens to carry fresh ICE credentials.
-
-## Phase 2 status
-
-The TypeScript side of Phases 2 through 6 (the session-creation endpoint, the
-`/remote/:sessionId` page, the file manager panel, the shared-folders editor,
-the camera/microphone request UI) is typechecked and built exactly like
-Phase 1 - see [Testing locally](#testing-locally).
-
-**The Rust agent now has been, too.** It was originally written in a sandbox
-with no Rust, .NET or C++ toolchain installed, so for several phases it had
-never been through `cargo build` even once. A real toolchain (rustup
-stable-x86_64-pc-windows-msvc, VS 2019 Build Tools, Windows SDK, CMake) was
-since set up and used to actually compile it. Before that, real bugs were
-caught and fixed by careful re-reading rather than by a compiler - among
-them: a data channel that hardcoded a capability check instead of using the
-session's actual granted permissions; a capture thread that `abort()` could
-not actually stop because it runs as blocking OS-thread work, which would
-have leaked a DXGI duplication handle and a D3D11 device on every session;
-the agent never sending `session:join` before its first
-`session:accept`/`webrtc:offer`, which the signaling relay would have
-rejected outright; a WASAPI mix-format buffer freed before the one COM call
-that still needed it (use-after-free); a directory listing that held its
-mutex guard across a disk-read `.await`, needlessly blocking other control
-messages for the duration; a motion data channel that hardcoded its
-capability check to always-true regardless of the session's actual granted
-permissions; and - the clearest sign that review alone can't substitute for
-a compiler - `main.rs`'s central frame-handling `match` was not exhaustive
-for two full phases (`ServerFrame::SessionState` had no arm), which
-`cargo build` refused outright as one of its first errors once actually run.
-
-Running the real compiler surfaced 29 more genuine errors on the first pass
-- wrong FFI out-parameter shapes in `capture.rs`/`audio.rs`, `openh264`'s and
-`nokhwa`'s actual trait/method names differing from the hand-written guesses
-in `video.rs`, a Win32 flags constant that turned out to be a plain `u32`
-rather than a newtype in `audio.rs`/`capture.rs`, and a few borrow/move and
-`Option`-wrapping mismatches in `filetransfer.rs`/`sas.rs`/`input.rs` - all
-now fixed. It also caught one more real runtime bug via a dead-code warning:
-`session.rs` was calling the wrong clipboard-write path for
-controller-to-remote text, which would have echoed those writes straight
-back to the controller as a spurious "new" clipboard change; fixed by
-sharing one `ClipboardSync` instance between the outgoing poller and the
-inbound handler. Both `cargo check` and `cargo build --release` now succeed
-with exit code 0:
-
-```bash
-cd backend/agent
-cargo build --release
-```
-
-produces a working `target/release/minedesk-agent.exe`, confirmed to run and
-respond correctly to `--help`, `enroll --help`, and a bare `run` with no
-enrollment present. **What this verification does not cover**: actual
-runtime behavior against a live server and real hardware - real screen
-capture from a GPU, a real WebRTC negotiation against the signaling hub, and
-real camera/microphone devices have not been exercised, only compilation,
-linking, and CLI-level smoke tests. See `backend/agent/README.md` for the full
-list of genuinely-remaining gaps (Windows service mode - needed for true
-unattended access when nobody is logged in, and for Ctrl+Alt+Del - tray/
-window UI, multi-monitor support, and others), none of which are
-compile-risk items anymore.
-
-~~One additional architectural gap worth knowing about even once the agent
-compiles: there is a race between the browser creating a session and the
-browser finishing its own WebSocket connect-and-join.~~ **Fixed in Phase 6** -
-see [What's implemented in Phase 6](#whats-implemented-in-phase-6).
 
 ## Prerequisites
 
 - Node.js >= 20.11 (developed against Node 22)
-- Docker Desktop, only if you want coturn (TURN) - entirely optional for
-  local dev, see RUN.md. Nothing else needs a service: the database is
-  SQLite/libSQL (Turso), just a file, and presence/signaling/rate limiting
-  all live in the API's own process memory (no Redis or other cache needed).
 - npm 10+ - no workspaces needed; `frontend/` and `backend/` are two
-  independent projects, each with its own `package.json`/`node_modules`.
+  independent projects, each with its own `package.json`/`node_modules`
+- Docker Desktop, only if you want a local coturn (TURN) container - entirely
+  optional for local dev
+- Rust (stable, MSVC toolchain) only if you're building the Windows agent
+  yourself - see `backend/agent/README.md`
 
-## Setup
+## Local setup
 
 ```bash
 git clone <this-repo>
@@ -414,12 +107,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 # they must all be different values.
 ```
 
-Apply the database schema (plain SQL, no ORM or migration engine - see
-`backend/db/schema.sql`):
+Apply the database schema (plain SQL, no ORM or migration engine):
 
 ```bash
 cd backend
-sqlite3 db/dev.db < db/schema.sql   # or: npx --yes @turso/cli db shell file:db/dev.db < db/schema.sql
+sqlite3 db/dev.db < db/schema.sql   # or point DATABASE_URL at a Turso db and apply it there
 cd ..
 ```
 
@@ -430,7 +122,7 @@ pre-verified so you can skip the email step):
 npm --prefix backend run db:seed
 ```
 
-Run both apps in dev mode:
+Run both apps:
 
 ```bash
 npm run dev
@@ -439,175 +131,80 @@ npm run dev
 - API: http://localhost:4000 (health check at `/health`, readiness at `/ready`)
 - Web: http://localhost:5173
 
-## Testing locally
+By default the frontend talks to whatever `VITE_API_URL`/`VITE_WS_URL` are set
+to in `frontend/.env` - point them at `http://localhost:4000`/`ws://localhost:4000`
+for a fully local stack, or at the deployed Render API to develop the frontend
+against production data.
 
-### 1. Type-check and build everything
+## Testing
 
 ```bash
-npm --prefix backend run build
+npm --prefix backend run build      # typecheck + build
 npm --prefix frontend run build
 ```
 
-Both apps build clean with zero `npm audit` findings.
-
-### 2. Unit tests (no database required)
-
 ```bash
 cd backend
-npx vitest run tests/paths.test.ts
+sqlite3 db/dev.db < db/schema.sql   # first time only
+npm test                            # auth, devices, paths, sessions
 ```
 
-This exercises the file-transfer path-traversal guard on its own (`../`,
-absolute paths, UNC paths, null bytes, Windows reserved device names,
-trailing-dot/space tricks) - the part of the security surface that is pure
-logic and does not need infrastructure.
+- **`tests/auth.test.ts`** - registration, login, lockout, refresh-token
+  rotation with reuse detection, 2FA, email verification, password reset
+- **`tests/devices.test.ts`** - device creation/enrollment, default
+  permissions, ownership isolation (IDOR checks), unattended access
+- **`tests/sessions.test.ts`** - session creation, capability snapshotting,
+  unattended-password auth and lockout
+- **`tests/paths.test.ts`** - the file-transfer path-traversal guard, pure
+  logic with no database needed (`npx vitest run tests/paths.test.ts`)
 
-### 3. Integration tests (need the database)
-
-These hit a real database rather than mocking the data layer, because the
-things worth testing - unique constraints, password hashing, refresh-token
-rotation, transactional revocation - are exactly what a mock gets wrong
-silently. No other service is needed - presence/rate-limit state resets via
-the in-process store between tests, same as the database does.
-
-```bash
-cd backend
-sqlite3 db/dev.db < db/schema.sql   # first time only - creates backend/db/dev.db
-npm test                            # runs auth.test.ts + devices.test.ts + paths.test.ts + sessions.test.ts
-```
-
-What's covered:
-- **`tests/auth.test.ts`** - registration + weak-password rejection, duplicate
-  email, password never stored in plaintext, login success/failure (identical
-  error for "wrong password" and "no such account"), account lockout,
-  protected-route rejection without/with a bad token, refresh-token rotation
-  **and reuse detection** (presenting a retired token revokes the session),
-  logout invalidating the access token immediately, single-use email
-  verification, and the forgot-password endpoint not leaking whether an
-  address exists.
-- **`tests/devices.test.ts`** - device creation with a generated device ID and
-  one-time enrollment code, default permission mask, device listing scoped to
-  the owner, an explicit **IDOR check** (user B gets `DEVICE_NOT_FOUND` for
-  user A's device, not a 403 that would confirm it exists), enrollment-code
-  single-use, agent authentication with a wrong secret, permission updates,
-  unattended access requiring a password, and revocation immediately
-  invalidating an issued agent token.
-- **`tests/paths.test.ts`** - see above.
-
-Run just one file with `npx vitest run tests/auth.test.ts`, or `npm run
-test:watch` while iterating.
-
-### 4. Manual smoke test through the UI
-
-1. `npm run dev`, open http://localhost:5173
-2. Register an account → you land on `/devices` (empty state)
-3. Settings → set up 2FA, scan the QR code, confirm with a code, save the
-   backup codes
-4. Log out, log back in → you're prompted for the 6-digit code
-5. Devices → **Add device** → name it → copy the `minedesk-agent enroll
-   --code ENR-...` command. If you've built the agent (`cd backend/agent &&
-   cargo build --release`), run that command for real against your local API
-   (`--api-url http://localhost:4000`) and the device should flip to online in
-   the dashboard within a few seconds. Otherwise this step just confirms the
-   code is generated, single-use, and expires.
-6. Open the device detail page → toggle permissions, try enabling unattended
-   access without a password (rejected), then with one (accepted) → check
-   **Activity** and see every one of these actions logged → check
-   **Security** and see the current browser session, with the option to
-   revoke others
-7. With the agent running and the device online, click **Connect**. With
-   unattended access enabled, the agent accepts automatically and you should
-   see its screen within a couple of seconds at `/remote/<sessionId>`; move
-   the mouse and type over the video to confirm input makes it across. If a
-   session hangs at "waiting for approval" with an online, unattended device,
-   see the [known invite race](#phase-2-status) above before assuming
-   something else is broken.
-8. With `camera`/`microphone` enabled in the device's permissions, click
-   **Request Camera** - the agent's console should print a y/n prompt; typing
-   `y` there should bring up a small red-bordered preview panel in the
-   browser within a couple of seconds (a fresh renegotiation, so expect a
-   brief pause). Typing `c` at the agent's console, or clicking **Stop
-   Camera** in the browser, should make the "Camera Active" indicator
-   disappear on both ends.
-9. Register a *second* account in a different browser (or an incognito
-   window). On the first account's device page, enable unattended access
-   with a password. In the second account, go to Devices → **Connect to a
-   device**, enter the device ID and that password → you should land in the
-   same `/remote/:sessionId` flow as step 7, without owning the device.
-   Trying five wrong passwords in a row should lock out with
-   `UNATTENDED_PASSWORD_INVALID` even on a since-corrected sixth attempt
-   (see `backend/tests/sessions.test.ts` for the same behavior under test).
-   Back in the first account, the device's **Access history** card should
-   show the second account's session, and a **Connected via access
-   password** card should list the second account by name.
-
-### 5. Exercising the signaling socket directly
-
-If you don't have the agent built yet, you can still confirm the relay itself
-works with a raw WebSocket client. Get an access token from the browser
-devtools after logging in (or from the `/api/v1/auth/login` response), then:
-
-```js
-const ws = new WebSocket(`ws://localhost:4000/signal?token=${accessToken}&role=controller`);
-ws.onmessage = (e) => console.log(JSON.parse(e.data));
-ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'controller' }));
-```
-
-You should see a `hello:ack` frame with a `connectionId` and a
-`heartbeatIntervalMs`. That confirms authentication, connection bookkeeping
-and the frame parser are all wired correctly independent of the agent.
-
-## Known limitations
-
-- The Remote Agent compiles and links (`cargo check`/`cargo build`/
-  `cargo build --release` all pass) and its CLI runs correctly, but full
-  end-to-end runtime behavior against a live server and real hardware is
-  still unverified - see [Phase 2 status](#phase-2-status).
-- Email delivery defaults to logging the message to the console
-  (`MAIL_TRANSPORT=console`); set `MAIL_TRANSPORT=smtp` and the `SMTP_*`
-  variables for real delivery.
-- Team/shared-device ownership is single-owner only; the `/devices/:id/access`
-  endpoint returns a one-row list today and is where multi-user sharing will
-  attach later.
-## Roadmap
-
-- ~~**Phase 2** - Remote Agent (Rust, Windows-first), WebRTC screen/input
-  streaming, connect/disconnect from the browser~~ - built; see
-  [Phase 2 status](#phase-2-status) for what still needs a working Rust
-  toolchain to verify, plus the Windows-service and reconnect work explicitly
-  deferred to Phases 5/6.
-- ~~**Phase 3** - Clipboard sync, remote audio, file transfer~~ - built; see
-  [Phase 2 status](#phase-2-status) (covers Phase 3's agent code too) and
-  [What's implemented in Phase 3](#whats-implemented-in-phase-3).
-- ~~**Phase 4** - Camera/microphone with consent prompts and always-on
-  indicators~~ - built; see [What's implemented in Phase 4](#whats-implemented-in-phase-4).
-- ~~**Phase 5** - Deeper unattended-access management, access history, security
-  hardening pass~~ - built; see [What's implemented in Phase 5](#whats-implemented-in-phase-5).
-- ~~**Phase 6** - TURN in production, reconnection/ICE-restart handling,
-  horizontal scaling, monitoring, deployment~~ - the code-level parts (invite
-  race, reconnection, ICE restart) are built; see
-  [What's implemented in Phase 6](#whats-implemented-in-phase-6). Actually
-  standing up TURN/monitoring infrastructure for a real deployment is still
-  ahead, as it always was - see [Deployment](#deployment).
+Tests hit a real SQLite file rather than mocking the data layer; presence and
+rate-limit state reset via the in-process store between runs, the same as the
+database does.
 
 ## Deployment
 
-See DEPLOY.md for the full step-by-step walkthrough (Turso, Render/Fly.io,
-Vercel). Summary of the pieces:
+Currently deployed as: **Vercel** (frontend, static build) + **Render**
+(backend, Docker) + **Turso** (database). Any container host works for the
+backend; any static host works for the frontend.
 
-- **Web**: static build (`frontend/dist`) to Vercel, or the provided nginx
-  Dockerfile
-- **API**: the provided Dockerfile to any container host (Fly.io, Render,
-  ECS, Azure Container Apps). Runs as a single instance - presence,
-  signaling and rate limiting live in its own process memory
-  (`backend/src/lib/store.ts`), not a shared cache, so there is deliberately
-  no second service to provision here; horizontally scaling the API behind
-  a load balancer would need that file's job back.
-- **Database**: a hosted Turso (libSQL) database - `turso db create`, apply
-  `backend/db/schema.sql` (`turso db shell <name> < backend/db/schema.sql`),
-  then set `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN`.
-  There's no ORM or migration engine in the way - it's the same plain SQL
-  file either way, just applied to a different database.
-- **TURN**: a dedicated coturn instance with a public IP; `TURN_STATIC_SECRET`
-  drives ephemeral per-session credentials so no long-lived TURN password
-  ever ships to a browser
+- **Frontend**: `frontend` as the project root, build command
+  `npm run build`, output `dist`. Set `VITE_API_URL`/`VITE_WS_URL` to the
+  deployed API's HTTPS/WSS origin - these are baked in at **build time** by
+  Vite, so changing them requires a redeploy, not just a dashboard edit.
+- **Backend**: build `backend/Dockerfile` on any container host. Required
+  env vars: `DATABASE_URL`/`DATABASE_AUTH_TOKEN` (Turso), `JWT_SECRET`,
+  `AGENT_JWT_SECRET`, `ENCRYPTION_KEY`, `WEB_ORIGIN` (comma-separated if you
+  need to allow more than one origin, e.g. a Vercel deploy and localhost),
+  `API_PUBLIC_URL` (the API's own public HTTPS URL - used in URLs it hands
+  back to the agent), and `AGENT_DOWNLOAD_URL` (where the compiled
+  `minedesk-agent.exe` is hosted - a GitHub Release asset works fine; the API
+  redirects there rather than serving the binary itself).
+- **Database**: create a Turso database, then apply `backend/db/schema.sql`
+  to it directly (`turso db shell <name> < backend/db/schema.sql`, or any
+  libSQL client that can run a SQL file) before the API's first request -
+  there's no migration engine or auto-provisioning.
+- **TURN** (optional but recommended for real-world NAT traversal): a
+  coturn instance with a public IP; `TURN_STATIC_SECRET` drives ephemeral
+  per-session credentials so no long-lived TURN password ever reaches a
+  browser. `backend/infrastructure/coturn` has a starting config.
+
+## Windows agent
+
+See [backend/agent/README.md](backend/agent/README.md) for what it captures,
+how to build it, and known limitations. The compiled binary is what
+**Download Agent** in the web UI serves (via `AGENT_DOWNLOAD_URL`); building
+it yourself only matters if you're changing agent code.
+
+## Known limitations
+
+- A browser-to-browser connection (no agent) is view-only by design - a web
+  page cannot inject OS input or access another tab's clipboard/filesystem.
+- Team/shared-device ownership is single-owner only; a device's unattended
+  password is the current mechanism for letting someone else connect.
+- Email delivery defaults to logging the message to the console
+  (`MAIL_TRANSPORT=console`); set `MAIL_TRANSPORT=smtp` and the `SMTP_*`
+  variables for real delivery.
+- The API runs as a single instance - presence, signaling and rate limiting
+  live in process memory, not a shared cache, so horizontal scaling would
+  need that piece rebuilt first (see `backend/src/lib/store.ts`).
