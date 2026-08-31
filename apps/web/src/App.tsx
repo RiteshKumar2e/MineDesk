@@ -28,6 +28,9 @@ export default function App() {
 
   return (
     <Routes>
+      {/* The AnyDesk-style front door: whoever opens the site lands here, no
+          login wall in the way - see QuickConnectPage's doc comment. */}
+      <Route path="/" element={<QuickConnectPage />} />
       <Route path="/connect" element={<QuickConnectPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
@@ -42,7 +45,6 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<Navigate to="/devices" replace />} />
         <Route path="/dashboard" element={<Navigate to="/devices" replace />} />
         <Route path="/devices" element={<DevicesPage />} />
         <Route path="/devices/:id" element={<DeviceDetailPage />} />

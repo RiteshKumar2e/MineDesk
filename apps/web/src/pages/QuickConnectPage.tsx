@@ -14,7 +14,7 @@ import { useCreateSession } from '../lib/sessionQueries';
  * than a special-cased anonymous path.
  */
 export default function QuickConnectPage() {
-  const { guestConnect } = useAuth();
+  const { user, guestConnect } = useAuth();
   const createSession = useCreateSession();
   const navigate = useNavigate();
 
@@ -29,7 +29,10 @@ export default function QuickConnectPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await guestConnect(name);
+      // Someone already signed in (a real account, or an earlier guest
+      // session still valid) keeps using that identity - minting a fresh
+      // guest here would silently replace it out from under them.
+      if (!user) await guestConnect(name);
       const res = await createSession.mutateAsync({
         deviceId: normalizeCode(deviceId),
         unattendedPassword: password || undefined,
@@ -110,10 +113,18 @@ export default function QuickConnectPage() {
         </div>
 
         <p className="mt-5 text-center text-xs text-zinc-400">
-          Own devices to manage?{' '}
-          <Link to="/login" className="font-medium hover:text-brand-600 hover:underline">
-            Sign in
-          </Link>
+          {user ? (
+            <Link to="/devices" className="font-medium hover:text-brand-600 hover:underline">
+              Go to my devices
+            </Link>
+          ) : (
+            <>
+              Own devices to manage?{' '}
+              <Link to="/login" className="font-medium hover:text-brand-600 hover:underline">
+                Sign in
+              </Link>
+            </>
+          )}
         </p>
       </div>
     </div>
