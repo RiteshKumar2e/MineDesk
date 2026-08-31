@@ -1,9 +1,16 @@
 # Deploying MineDesk
 
-Four services, none of them optional: a static web frontend, a
-long-running API (it holds signaling WebSockets open), a database, and
-Redis. This is a from-scratch walkthrough for *this* machine's actual
-state, not a generic guide - see RUN.md for local development instead.
+Three services: a static web frontend, a long-running API (it holds
+signaling WebSockets open), and a database. This is a from-scratch
+walkthrough for *this* machine's actual state, not a generic guide - see
+RUN.md for local development instead.
+
+There is deliberately no cache/broker service (Redis or otherwise) to stand
+up: presence, signaling and rate limiting all live in the API's own
+in-process memory (`backend/src/lib/store.ts`), which is correct as long as
+the API runs as a single instance - true of every option below. If this
+ever needs to scale to more than one instance, that file is where a shared
+store would need to come back.
 
 **Repo layout**: two top-level folders, each a fully standalone project -
 `frontend/` (the React dashboard) and `backend/` (the Fastify API, plus
@@ -34,7 +41,7 @@ the entire life of an agent connection and every remote session, and
 Vercel's serverless functions are not built for that (they run per-request
 and time out). Render and Fly.io both run the API as a normal long-running
 process/container, which is what a stateful WebSocket server actually
-needs - pick whichever of the two you prefer in step 4, both are configured
+needs - pick whichever of the two you prefer in step 3, both are configured
 and ready to go.
 
 ## 1. Database: Turso
@@ -49,7 +56,7 @@ wsl -e turso db tokens create minedesk        # -> a long-lived auth token
 ```
 
 Save both values - they become `DATABASE_URL` and `DATABASE_AUTH_TOKEN`
-in step 4.
+in step 3.
 
 **Apply the schema.** There's no ORM or migration engine in the way - the
 schema is already plain SQL at `backend/db/schema.sql`, so apply it directly
@@ -64,20 +71,13 @@ Re-run the seed script once, pointed at the new database (temporarily set
 `npm --prefix backend run db:seed`, then remove them again) if you want the
 demo account there too - or just register a real account once the API is live.
 
-## 2. Redis: Upstash
-
-**(you)** Sign up at https://upstash.com (free tier is enough to start),
-create a Redis database, and copy its **Redis URL** (the `rediss://...`
-connection string, not the REST API URL - `backend/src/lib/redis.ts` uses
-`ioredis` directly). This becomes `REDIS_URL` in step 4.
-
-## 3. TURN (optional for now)
+## 2. TURN (optional for now)
 
 Skip this initially - STUN alone connects fine on most networks, and
 `coturn` needs a host with a public IP anyway. Revisit only if real users
 report sessions that never connect (symmetric NAT / restrictive firewalls).
 
-## 4. API: Render or Fly.io
+## 3. API: Render or Fly.io
 
 Both are a real fit (long-running container, not a serverless function) -
 pick one. Render is dashboard-driven (no CLI login flow, just click through
@@ -97,9 +97,9 @@ regions/scaling.
    because it's what `backend/Dockerfile` and `backend/fly.toml` already
    agree on, so switching between Render and Fly.io later costs nothing.
 5. Under **Environment**, add: `DATABASE_URL`, `DATABASE_AUTH_TOKEN`,
-   `REDIS_URL`, `JWT_SECRET`, `AGENT_JWT_SECRET`, `ENCRYPTION_KEY`,
-   `API_PUBLIC_URL`, `WEB_ORIGIN` - paste in the values from steps 1-2
-   above, and generate the three secrets with:
+   `JWT_SECRET`, `AGENT_JWT_SECRET`, `ENCRYPTION_KEY`, `API_PUBLIC_URL`,
+   `WEB_ORIGIN` - paste in the values from step 1 above, and generate the
+   three secrets with:
    ```powershell
    node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
    ```
@@ -107,7 +107,7 @@ regions/scaling.
    they must all differ; ENCRYPTION_KEY only needs 32 random bytes, the
    other two 48 is fine). Also set `NODE_ENV=production`.
 6. Deploy. Render gives you a `https://minedesk-api.onrender.com`-shaped URL
-   - that's your `API_PUBLIC_URL` and the value step 5's `VITE_API_URL`/
+   - that's your `API_PUBLIC_URL` and the value step 4's `VITE_API_URL`/
    `VITE_WS_URL` point at.
 
 Render's free tier spins the service down after 15 minutes idle and takes
@@ -139,7 +139,6 @@ which is committed to git):
 flyctl secrets set `
   DATABASE_URL="libsql://minedesk-<org>.turso.io" `
   DATABASE_AUTH_TOKEN="<from step 1>" `
-  REDIS_URL="rediss://<from step 2>" `
   JWT_SECRET="$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")" `
   AGENT_JWT_SECRET="$(node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))")" `
   ENCRYPTION_KEY="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))")" `
@@ -148,7 +147,7 @@ flyctl secrets set `
 ```
 
 (Adjust the last two once you know your actual Fly.io and Vercel URLs - Fly
-assigns `<app-name>.fly.dev` immediately; Vercel's is chosen in step 5.)
+assigns `<app-name>.fly.dev` immediately; Vercel's is chosen in step 4.)
 
 Deploy:
 
@@ -163,7 +162,7 @@ flyctl status
 curl https://minedesk-api.fly.dev/ready
 ```
 
-## 5. Web: Vercel
+## 4. Web: Vercel
 
 **(you)** Whether you use the dashboard or the CLI, set **Root Directory**
 to `frontend` - it's a plain Vite app there, Vercel auto-detects the
@@ -188,7 +187,7 @@ vercel --prod
 rewrite so client-side routes like `/devices` don't 404 on a hard refresh -
 everything else Vercel figures out on its own from `frontend/package.json`.
 
-## 6. Point them at each other
+## 5. Point them at each other
 
 Once both are live with real URLs, go back and update:
 - Render/Fly: set `API_PUBLIC_URL` to the API's own URL and `WEB_ORIGIN` to
@@ -197,7 +196,7 @@ Once both are live with real URLs, go back and update:
 - Vercel: update `VITE_API_URL`/`VITE_WS_URL` if the backend's URL changed,
   then redeploy.
 
-## 7. Verify end to end
+## 6. Verify end to end
 
 1. Open the Vercel URL - the Quick Connect screen should load with no login
    wall (see `frontend/src/App.tsx`'s root route).
@@ -214,7 +213,7 @@ Once both are live with real URLs, go back and update:
 - **No CI/CD** - both deploys above are manual (`flyctl deploy` / `vercel
   --prod`, or a dashboard click) each time. A GitHub Actions workflow
   triggering both on push to `master` is the natural next step, not built yet.
-- **TURN is skipped** (step 3) - fine for most networks, a real gap for
+- **TURN is skipped** (step 2) - fine for most networks, a real gap for
   strict corporate/mobile NATs.
 - **Fly.io's `min_machines_running = 1`** in `backend/fly.toml` means the
   API never scales to zero (a WebSocket server can't, or every agent gets

@@ -1,7 +1,8 @@
 import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
 import { randomUUID } from 'node:crypto';
 import { env } from '../config/env.js';
-import { redis, REDIS_KEYS } from './redis.js';
+import { KEYS } from './keys.js';
+import * as store from './store.js';
 
 /**
  * Two completely separate signing keys are used:
@@ -91,12 +92,12 @@ export async function verifyAgentToken(token: string): Promise<AgentTokenClaims>
  */
 export async function revokeJti(jti: string, ttlSeconds: number): Promise<void> {
   if (ttlSeconds <= 0) return;
-  await redis.set(REDIS_KEYS.revokedJti(jti), '1', 'EX', ttlSeconds);
+  store.set(KEYS.revokedJti(jti), '1', ttlSeconds);
 }
 
 export async function isJtiRevoked(jti: string | undefined): Promise<boolean> {
   if (!jti) return false;
-  return (await redis.exists(REDIS_KEYS.revokedJti(jti))) === 1;
+  return store.exists(KEYS.revokedJti(jti));
 }
 
 /** Seconds left on a JWT, used to size its denylist entry. */

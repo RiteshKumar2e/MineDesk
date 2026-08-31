@@ -24,10 +24,13 @@ The database is SQLite/libSQL (Turso), not Postgres - it's a plain file
 **there is nothing to install or run for it**. There is no ORM either: the
 API talks to it directly through `@libsql/client` (`backend/src/lib/db.ts`),
 and the schema lives as plain SQL in `backend/db/schema.sql` - no migration
-engine, no generated client. Docker is only needed for Redis (and optionally
-coturn); it isn't currently usable from a terminal on this machine (no
-`docker` command on PATH, no working Docker Desktop install detected) - see
-step 2.
+engine, no generated client. There's also no separate cache/broker service
+to run: presence, signaling and rate limiting all live in an in-process
+store (`backend/src/lib/store.ts`), correct for a single-instance deployment
+and one less thing to install. Docker is only needed for coturn (optional,
+skip it for local dev - see the note below), and isn't currently usable from
+a terminal on this machine anyway (no `docker` command on PATH, no working
+Docker Desktop install detected).
 
 ## 1. Install dependencies
 
@@ -40,69 +43,14 @@ npm --prefix backend install
 npm --prefix frontend install
 ```
 
-## 2. Get Redis running
+## 2. coturn (optional, skip for now)
 
-The API needs Redis reachable at `redis://localhost:6379` (presence,
-pub/sub, rate limiting - see `backend/src/lib/redis.ts`). It is **not**
-running on this machine right now (confirmed: no `docker` CLI, and WSL2's
-Ubuntu distro has no `redis-server` installed either). Pick one:
-
-### Option A - Docker Desktop (recommended, matches `docker-compose.yml`)
-
-1. Install Docker Desktop for Windows: https://www.docker.com/products/docker-desktop/
-   and make sure it's actually running (the whale icon in the system tray)
-   before opening a new terminal - PATH is only updated for terminals opened
-   after install.
-2. From the repo root:
-   ```powershell
-   npm run infra:up   # docker compose up -d redis coturn
-   ```
-3. Confirm it's healthy:
-   ```powershell
-   docker compose ps
-   ```
-
-### Option B - No Docker: Redis inside WSL2
-
-WSL2 itself is already installed on this machine (Ubuntu, default) and
-Redis is now installed in it too. If you don't remember your WSL Linux
-user's password (separate from your Windows password, set the first time
-WSL launched), skip `sudo` entirely and run as root instead - root needs no
-password:
-
-```powershell
-wsl -u root -e bash -c "apt update && apt install -y redis-server && service redis-server start"
-```
-
-**Known gotcha, already hit and fixed once in this setup**: WSL2 shuts its
-whole lightweight VM down a few seconds after the last attached process
-exits (no terminal, no `wsl.exe` process keeping it alive) - and when the VM
-goes, everything inside it dies too, `redis-server` included, even though it
-was started as a proper background service. You'll see `npm run dev` start
-logging `[ioredis] ECONNREFUSED` again after Redis had been working. Two
-fixes:
-
-- **Quick, per-session**: keep some WSL process attached in the background,
-  e.g. `wsl -u root -e bash -c "service redis-server start && tail -f /dev/null"`
-  left running in its own terminal.
-- **Permanent**: create/edit `%UserProfile%\.wslconfig` with:
-
-  ```ini
-  [wsl2]
-  vmIdleTimeout=-1
-  ```
-
-  then `wsl --shutdown` and start WSL again - the VM (and anything running
-  as a real service inside it, like Redis) then stays up indefinitely
-  without needing an attached process.
-
-(Or install [Memurai](https://www.memurai.com/), a native Windows
-Redis-protocol-compatible service, instead - no WSL, no idle-timeout gotcha.)
-
-**coturn (TURN server)** is separate from Redis and only needed for WebRTC
-when the browser and agent can't reach each other directly (symmetric NAT,
-strict firewalls). Skip it for now - on a single machine or simple LAN,
-direct P2P or STUN-only connects fine without it.
+**coturn (TURN server)** is only needed for WebRTC when the browser and agent
+can't reach each other directly (symmetric NAT, strict firewalls). Skip it
+for local dev - on a single machine or simple LAN, direct P2P or STUN-only
+connects fine without it, and nothing else in this runbook depends on it.
+If you do need it later: `npm run infra:up` (`docker compose up -d coturn`)
+once Docker Desktop is installed and running.
 
 ## 3. Configure secrets
 
@@ -242,16 +190,11 @@ the device should now show **online** on the dashboard - click it and
 
 ## Troubleshooting
 
-- **`npm run dev` logs repeated `[ioredis] Unhandled error event: ECONNREFUSED`**
-  - Redis isn't up yet. Do step 2. The API will otherwise start (SQLite
-    doesn't need a service), but presence, session signaling and rate limiting
-    all depend on Redis, so device status and remote sessions won't work
-    without it.
 - **API fails at startup with a `DATABASE_URL` or SQLite error** - confirm
   `backend/.env`'s `DATABASE_URL=file:./db/dev.db` and that
   `backend/db/dev.db` actually exists (see step 4 to recreate it). `/ready`
-  (http://localhost:4000/ready) reports `database` and `redis` health
-  separately if you need to narrow down which one is the problem.
+  (http://localhost:4000/ready) reports the database check if you need to
+  narrow down the problem.
 - **"no such table" on a fresh database** - `db/schema.sql` was never applied.
   Rerun the `sqlite3`/`turso db shell` command from step 4 against the file
   `DATABASE_URL` actually points at.

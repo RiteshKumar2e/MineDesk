@@ -1,15 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app.js';
 import { disconnectDb, execute } from '../src/lib/db.js';
-import { redis, redisPublisher, redisSubscriber } from '../src/lib/redis.js';
+import * as store from '../src/lib/store.js';
 
 /**
- * Integration tests run against a real SQLite/libSQL database and Redis (see
- * docker-compose.yml for Redis; the database is just a local file - see
- * RUN.md) rather than mocks - password hashing, unique constraints,
- * transactions and token rotation are exactly the things a mock would get
- * wrong silently. Point DATABASE_URL / REDIS_URL at disposable instances
- * before running these.
+ * Integration tests run against a real SQLite/libSQL database (see RUN.md;
+ * it's just a local file) rather than mocks - password hashing, unique
+ * constraints, transactions and token rotation are exactly the things a mock
+ * would get wrong silently. Presence/rate-limit/lockout state lives in the
+ * in-process store (lib/store.ts), reset the same way between tests.
  */
 export async function withApp(): Promise<FastifyInstance> {
   const app = await buildApp();
@@ -31,13 +30,12 @@ export async function resetDatabase(): Promise<void> {
   await execute('DELETE FROM verification_tokens');
   await execute('DELETE FROM auth_sessions');
   await execute('DELETE FROM users');
-  await redis.flushdb();
+  store.clear();
 }
 
 export async function closeAll(app: FastifyInstance): Promise<void> {
   await app.close();
   disconnectDb();
-  await Promise.allSettled([redis.quit(), redisPublisher.quit(), redisSubscriber.quit()]);
 }
 
 export function uniqueEmail(prefix = 'user'): string {

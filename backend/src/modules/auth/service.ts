@@ -8,7 +8,7 @@ import { execute, newId, nowIso, queryAll, queryOne } from '../../lib/db.js';
 import { AppError } from '../../lib/errors.js';
 import { mailer, passwordResetEmail, verificationEmail } from '../../lib/mailer.js';
 import { mapAuthSession, mapUser, type AuthSessionRow, type UserRow } from '../../lib/models.js';
-import { redis } from '../../lib/redis.js';
+import * as store from '../../lib/store.js';
 import { revokeJti, signAccessToken } from '../../lib/tokens.js';
 
 export interface RequestMeta {
@@ -199,16 +199,16 @@ const challengeKey = (token: string) => `2fa:challenge:${token}`;
 
 export async function createTwoFactorChallenge(userId: string): Promise<string> {
   const token = generateOpaqueToken(24);
-  await redis.set(challengeKey(hashToken(token)), userId, 'EX', CHALLENGE_TTL_SECONDS);
+  store.set(challengeKey(hashToken(token)), userId, CHALLENGE_TTL_SECONDS);
   return token;
 }
 
 /** Consumes the challenge: a token works exactly once, whatever the outcome. */
 export async function consumeTwoFactorChallenge(token: string): Promise<string | null> {
   const key = challengeKey(hashToken(token));
-  const userId = await redis.get(key);
+  const userId = store.get(key);
   if (!userId) return null;
-  await redis.del(key);
+  store.del(key);
   return userId;
 }
 

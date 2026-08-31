@@ -50,7 +50,7 @@ export const HelloAckMessage = z.object({
   heartbeatIntervalMs: z.number().int().positive(),
 });
 
-/** Agent to server, every heartbeatIntervalMs. Refreshes the Redis presence TTL. */
+/** Agent to server, every heartbeatIntervalMs. Refreshes the presence TTL. */
 export const HeartbeatMessage = z.object({
   ...base,
   type: z.literal('heartbeat'),
@@ -123,7 +123,7 @@ export const SessionDenyMessage = z.object({
  * open its signaling socket and join until *after* that HTTP response comes
  * back. An agent that accepts instantly (unattended access) and sends its
  * offer right away can easily win that race, publishing the offer to a
- * session channel with no subscriber yet - Redis pub/sub does not queue a
+ * session channel with no subscriber yet - the signaling hub does not queue a
  * publish for a channel nobody is listening on, so the offer is silently
  * lost and the session hangs. An agent that waits for `session:ready`
  * before generating its offer cannot lose this race, because by

@@ -1,14 +1,12 @@
 import { buildApp } from './app.js';
 import { env } from './config/env.js';
 import { checkDbConnection, disconnectDb } from './lib/db.js';
-import { disconnectRedis, redis } from './lib/redis.js';
 import { hub } from './modules/signaling/hub.js';
 
 async function main(): Promise<void> {
-  // Fail fast if the database or Redis are unreachable, rather than accepting
-  // traffic into a process that cannot actually serve it.
+  // Fail fast if the database is unreachable, rather than accepting traffic
+  // into a process that cannot actually serve it.
   await checkDbConnection();
-  await redis.ping();
 
   const app = await buildApp();
 
@@ -30,7 +28,6 @@ async function main(): Promise<void> {
 
     await app.close();
     disconnectDb();
-    await disconnectRedis();
     process.exit(0);
   };
 

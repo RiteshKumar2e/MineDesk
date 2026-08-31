@@ -1,4 +1,5 @@
-import { redis, REDIS_KEYS } from './redis.js';
+import { KEYS } from './keys.js';
+import * as store from './store.js';
 
 /**
  * Brute-force protection for the unattended-access password.
@@ -12,33 +13,32 @@ import { redis, REDIS_KEYS } from './redis.js';
  * correct unit of protection - locking the caller's *account* would do
  * nothing to stop a different account from immediately trying next.
  *
- * State lives in Redis only (no DB column, no migration) - consistent with
- * how every other rate limit in this API is implemented, and an acceptable
- * trade-off: a Redis restart resets the counter, but does not reset
- * anything a real attacker could not simply wait out anyway.
+ * State lives in the in-memory store only (no DB column, no migration) - an
+ * acceptable trade-off: a process restart resets the counter, but does not
+ * reset anything a real attacker could not simply wait out anyway.
  */
 const MAX_ATTEMPTS = 5;
 const ATTEMPT_WINDOW_SECONDS = 15 * 60;
 const LOCKOUT_SECONDS = 15 * 60;
 
 export async function isUnattendedAccessLocked(deviceId: string): Promise<boolean> {
-  return (await redis.exists(REDIS_KEYS.unattendedLockout(deviceId))) === 1;
+  return store.exists(KEYS.unattendedLockout(deviceId));
 }
 
 /** Records one wrong password. Returns true if this failure just triggered a lockout. */
 export async function recordUnattendedFailure(deviceId: string): Promise<boolean> {
-  const key = REDIS_KEYS.unattendedAttempts(deviceId);
-  const attempts = await redis.incr(key);
-  if (attempts === 1) await redis.expire(key, ATTEMPT_WINDOW_SECONDS);
+  const key = KEYS.unattendedAttempts(deviceId);
+  const attempts = store.incr(key);
+  if (attempts === 1) store.expire(key, ATTEMPT_WINDOW_SECONDS);
 
   if (attempts >= MAX_ATTEMPTS) {
-    await redis.set(REDIS_KEYS.unattendedLockout(deviceId), '1', 'EX', LOCKOUT_SECONDS);
-    await redis.del(key);
+    store.set(KEYS.unattendedLockout(deviceId), '1', LOCKOUT_SECONDS);
+    store.del(key);
     return true;
   }
   return false;
 }
 
 export async function clearUnattendedFailures(deviceId: string): Promise<void> {
-  await redis.del(REDIS_KEYS.unattendedAttempts(deviceId));
+  store.del(KEYS.unattendedAttempts(deviceId));
 }

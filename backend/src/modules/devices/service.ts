@@ -38,8 +38,9 @@ export function toPublicDevice(device: DeviceWithRelations, online: boolean): Pu
     os: device.os as DeviceOs,
     osVersion: device.osVersion,
     agentVersion: device.agentVersion,
-    // Presence comes from Redis, not from the denormalized column, so a crashed
-    // replica cannot leave a device permanently "online".
+    // Presence comes from the in-memory TTL store (lib/presence.ts), not the
+    // denormalized column, so a crashed process cannot leave a device
+    // permanently "online" - the TTL just lapses.
     status: (online ? 'online' : 'offline') as DeviceStatus,
     lastSeenAt: device.lastSeenAt?.toISOString() ?? null,
     unattendedAccessEnabled: device.unattendedAccessEnabled,

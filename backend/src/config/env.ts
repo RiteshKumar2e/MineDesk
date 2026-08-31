@@ -36,7 +36,6 @@ const schema = z.object({
   // database (libsql://<name>.turso.io) additionally needs DATABASE_AUTH_TOKEN.
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   DATABASE_AUTH_TOKEN: z.string().optional(),
-  REDIS_URL: z.string().min(1, 'REDIS_URL is required'),
 
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
   AGENT_JWT_SECRET: z.string().min(32, 'AGENT_JWT_SECRET must be at least 32 characters'),

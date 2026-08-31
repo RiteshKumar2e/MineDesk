@@ -28,7 +28,7 @@ phase's agent-side additions too.
 ```
 Browser (React) --HTTPS--> API (Fastify) --> SQLite/Turso (source of truth)
        |                        |
-       |WSS /signal             +--> Redis (presence, pub/sub, rate limits)
+       |WSS /signal             +--> in-process store (presence, rate limits)
        v                        |
 Remote Agent (Phase 2+) <-------+
        \                       /
@@ -85,15 +85,15 @@ docker-compose.yml
 - TOTP two-factor authentication with backup codes
 - Per-browser session listing and remote revocation
 - Account lockout after repeated failed logins
-- Distributed rate limiting (Redis-backed, survives multiple API replicas)
+- In-process rate limiting (correct for the current single-instance deployment)
 
 **Device registration**
 - Owner creates a device in the dashboard → gets a one-time enrollment code
 - Agent exchanges the code for a device-scoped credential and a 9-digit
   device id (AnyDesk-style, e.g. `261 967 268`)
 - Device-scoped JWTs, separate signing key from user tokens
-- Presence via Redis TTL keys refreshed by heartbeat (crash-safe: a dead
-  replica cannot leave a device stuck "online")
+- Presence via an in-process TTL entry refreshed by heartbeat (crash-safe: a
+  restart cannot leave a device stuck "online" - the TTL just lapses)
 - Per-device permission mask (screen/mouse/keyboard/clipboard/files/
   audio/camera/microphone), enforced server-side and meant to be re-checked
   by the agent
@@ -246,8 +246,8 @@ of the password. Now:
   the reason is "wrong password" or "unattended access is off," so this
   endpoint cannot be used to probe a device's configuration; five wrong
   attempts locks the *device* (not the caller's account - a different caller
-  trying next should not get a fresh budget) for 15 minutes, tracked in
-  Redis the same way login lockout is tracked
+  trying next should not get a fresh budget) for 15 minutes, tracked
+  in-process the same way presence and rate limiting are
 - A new **"Connect to a device"** flow on `/devices` lets any signed-in user
   enter a device ID and password directly, separate from "Add device" (which
   enrolls a new agent under *your* account)
@@ -274,19 +274,21 @@ which capabilities were used, per session.
 
 **Not yet implemented**: full multi-user device sharing (inviting a specific
 person by email, assigning them a role, revoking just them rather than
-rotating the shared password), and a persistent (DB-backed, not Redis-only)
-record of unattended-lockout events.
+rotating the shared password), and a persistent (DB-backed, not
+in-process-only) record of unattended-lockout events.
 
 ## What's implemented in Phase 6
 
 This phase closes the invite race documented (until now) in
 [Phase 2 status](#phase-2-status) below, and adds reconnection/ICE-restart -
 the two concrete, code-level items from this phase's original scope.
-TURN-in-production, horizontal scaling and monitoring/deployment were mostly
-already true by construction (stateless API, Redis-backed presence and
-rate limiting, ephemeral TURN credentials since Phase 1) rather than needing
-new code; see [Deployment](#deployment) for what's left
-there, which is infrastructure rather than application code.
+Ephemeral TURN credentials have existed since Phase 1. Horizontal scaling is
+explicitly *not* a goal right now: presence, signaling and rate limiting
+live in the API's own process memory (`backend/src/lib/store.ts`), correct
+for - and simpler to deploy as - a single instance; see that file's comment
+for what would need to come back if that ever changes. See
+[Deployment](#deployment) for what's left there, which is
+infrastructure rather than application code.
 
 **The invite race is fixed.** A new server-only signaling message,
 `session:ready`, is published to a session's channel the moment the
@@ -388,10 +390,10 @@ see [What's implemented in Phase 6](#whats-implemented-in-phase-6).
 ## Prerequisites
 
 - Node.js >= 20.11 (developed against Node 22)
-- Docker Desktop for Redis and coturn - or your own local Redis 7+ (see
-  RUN.md for a no-Docker WSL2/Memurai path). The database is SQLite/libSQL
-  (Turso), which needs nothing installed for local development - it's just a
-  file.
+- Docker Desktop, only if you want coturn (TURN) - entirely optional for
+  local dev, see RUN.md. Nothing else needs a service: the database is
+  SQLite/libSQL (Turso), just a file, and presence/signaling/rate limiting
+  all live in the API's own process memory (no Redis or other cache needed).
 - npm 10+ - no workspaces needed; `frontend/` and `backend/` are two
   independent projects, each with its own `package.json`/`node_modules`.
 
@@ -410,12 +412,6 @@ cp frontend/.env.example frontend/.env
 node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
 # Run that three times for JWT_SECRET, AGENT_JWT_SECRET, ENCRYPTION_KEY -
 # they must all be different values.
-```
-
-Start Redis (coturn is optional for Phase 1 - nothing needs TURN yet):
-
-```bash
-docker compose up -d redis
 ```
 
 Apply the database schema (plain SQL, no ORM or migration engine - see
@@ -466,18 +462,18 @@ absolute paths, UNC paths, null bytes, Windows reserved device names,
 trailing-dot/space tricks) - the part of the security surface that is pure
 logic and does not need infrastructure.
 
-### 3. Integration tests (need the database + Redis)
+### 3. Integration tests (need the database)
 
 These hit a real database rather than mocking the data layer, because the
 things worth testing - unique constraints, password hashing, refresh-token
 rotation, transactional revocation - are exactly what a mock gets wrong
-silently.
+silently. No other service is needed - presence/rate-limit state resets via
+the in-process store between tests, same as the database does.
 
 ```bash
-docker compose up -d redis
 cd backend
 sqlite3 db/dev.db < db/schema.sql   # first time only - creates backend/db/dev.db
-npm test                            # runs auth.test.ts + devices.test.ts + paths.test.ts
+npm test                            # runs auth.test.ts + devices.test.ts + paths.test.ts + sessions.test.ts
 ```
 
 What's covered:
@@ -596,21 +592,22 @@ and the frame parser are all wired correctly independent of the agent.
 
 ## Deployment
 
-See DEPLOY.md for the full step-by-step walkthrough (Turso, Upstash, Render/
-Fly.io, Vercel). Summary of the pieces:
+See DEPLOY.md for the full step-by-step walkthrough (Turso, Render/Fly.io,
+Vercel). Summary of the pieces:
 
 - **Web**: static build (`frontend/dist`) to Vercel, or the provided nginx
   Dockerfile
 - **API**: the provided Dockerfile to any container host (Fly.io, Render,
-  ECS, Azure Container Apps); it's stateless, so it scales horizontally behind
-  a load balancer as soon as the database/Redis are reachable
+  ECS, Azure Container Apps). Runs as a single instance - presence,
+  signaling and rate limiting live in its own process memory
+  (`backend/src/lib/store.ts`), not a shared cache, so there is deliberately
+  no second service to provision here; horizontally scaling the API behind
+  a load balancer would need that file's job back.
 - **Database**: a hosted Turso (libSQL) database - `turso db create`, apply
   `backend/db/schema.sql` (`turso db shell <name> < backend/db/schema.sql`),
   then set `DATABASE_URL=libsql://<name>.turso.io` and `DATABASE_AUTH_TOKEN`.
   There's no ORM or migration engine in the way - it's the same plain SQL
   file either way, just applied to a different database.
-- **Redis**: managed Redis (Upstash, ElastiCache...) - required for presence
-  and cross-replica signaling once you run more than one API instance
 - **TURN**: a dedicated coturn instance with a public IP; `TURN_STATIC_SECRET`
   drives ephemeral per-session credentials so no long-lived TURN password
   ever ships to a browser

@@ -15,7 +15,7 @@
     "build:frontend": "npm --prefix frontend run build",
     "test:backend": "npm --prefix backend run test",
     "test:frontend": "npm --prefix frontend run test",
-    "infra:up": "docker compose up -d redis coturn",
+    "infra:up": "docker compose up -d coturn",
     "infra:down": "docker compose down"
   },
   "devDependencies": {

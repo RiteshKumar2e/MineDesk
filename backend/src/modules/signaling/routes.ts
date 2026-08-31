@@ -6,7 +6,7 @@ import { env } from '../../config/env.js';
 import { recordAudit } from '../../lib/audit.js';
 import { execute, nowIso, queryOne } from '../../lib/db.js';
 import { markDeviceOffline, markDeviceOnline, refreshPresence } from '../../lib/presence.js';
-import { REDIS_KEYS } from '../../lib/redis.js';
+import { KEYS } from '../../lib/keys.js';
 import { isJtiRevoked, verifyAccessToken, verifyAgentToken } from '../../lib/tokens.js';
 import { hub, type HubConnection } from './hub.js';
 
@@ -74,7 +74,7 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
         };
 
         hub.add(connection);
-        await hub.joinChannel(REDIS_KEYS.deviceChannel(device.deviceId), connection.id);
+        await hub.joinChannel(KEYS.deviceChannel(device.deviceId), connection.id);
         await markDeviceOnline({
           deviceId: device.deviceId,
           connectionId: connection.id,
@@ -131,8 +131,8 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
 
     /**
      * Presence watchdog. If an agent stops heartbeating - laptop suspended, Wi-Fi
-     * dropped - the Redis key lapses on its own; this timer additionally closes
-     * the half-open socket so the replica does not hold it forever.
+     * dropped - the presence entry lapses on its own; this timer additionally
+     * closes the half-open socket so the process does not hold it forever.
      */
     const watchdog = setInterval(() => {
       const silentFor = Date.now() - connection.lastSeen;
@@ -205,7 +205,7 @@ export async function signalingRoutes(app: FastifyInstance): Promise<void> {
           }
 
           connection.sessions.add(message.sessionId);
-          await hub.joinChannel(REDIS_KEYS.sessionChannel(message.sessionId), connection.id);
+          await hub.joinChannel(KEYS.sessionChannel(message.sessionId), connection.id);
           send({
             v: PROTOCOL_VERSION,
             type: 'session:state',

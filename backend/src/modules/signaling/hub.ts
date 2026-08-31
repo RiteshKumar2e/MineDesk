@@ -1,20 +1,21 @@
 import type { ServerMessage } from '../../vendor/protocol/index.js';
 import { randomUUID } from 'node:crypto';
 import type { WebSocket } from 'ws';
-import { REDIS_KEYS, redisPublisher, redisSubscriber } from '../../lib/redis.js';
+import { KEYS } from '../../lib/keys.js';
 
 /**
  * Signaling hub.
  *
- * A connection lives on exactly one API replica, but the two ends of a session
- * may land on different replicas behind the load balancer. Rather than making
- * the API stateful, every outbound frame is published to a Redis channel named
- * after its recipient; whichever replica holds that socket is subscribed and
- * delivers it.
+ * The API runs as a single process, so both ends of a session are always
+ * connections this same process holds - "publishing" a frame is just looking
+ * up who's subscribed to a channel and writing to their sockets directly, no
+ * separate broker involved. (An earlier version of this used Redis pub/sub to
+ * support multiple API replicas; if that need comes back, this is the file
+ * to reintroduce it in.)
  *
  * This is a control-plane path only. It carries kilobytes of SDP and ICE, not
- * media - the video never enters this process, so a replica can hold thousands
- * of idle signaling sockets on a small instance.
+ * media - the video never enters this process, so it can hold thousands of
+ * idle signaling sockets on a small instance.
  */
 export type ConnectionRole = 'agent' | 'controller';
 
@@ -34,24 +35,17 @@ export interface HubConnection {
   ip: string;
 }
 
-type Delivery = { channel: string; payload: string };
-
 class SignalingHub {
-  /** This replica's identity, used for presence bookkeeping. */
+  /** Kept for parity with the old multi-replica shape (used in presence records/logging). */
   readonly nodeId = process.env.NODE_ID ?? randomUUID();
 
   private readonly connections = new Map<string, HubConnection>();
-  /** channel -> connection ids subscribed on this replica */
+  /** channel -> connection ids subscribed to it */
   private readonly channelMembers = new Map<string, Set<string>>();
-  private started = false;
 
-  /** Wire up the shared Redis subscriber exactly once per process. */
+  /** No-op now that delivery is direct in-process dispatch - kept so call sites don't need to change. */
   start(): void {
-    if (this.started) return;
-    this.started = true;
-    redisSubscriber.on('message', (channel: string, payload: string) => {
-      this.deliverLocal({ channel, payload });
-    });
+    /* nothing to wire up */
   }
 
   add(connection: HubConnection): void {
@@ -68,47 +62,43 @@ class SignalingHub {
     this.connections.delete(connectionId);
 
     const channels = [
-      ...(connection.deviceId ? [REDIS_KEYS.deviceChannel(connection.deviceId)] : []),
-      ...[...connection.sessions].map((sessionId) => REDIS_KEYS.sessionChannel(sessionId)),
+      ...(connection.deviceId ? [KEYS.deviceChannel(connection.deviceId)] : []),
+      ...[...connection.sessions].map((sessionId) => KEYS.sessionChannel(sessionId)),
     ];
-    await Promise.all(channels.map((channel) => this.leaveChannel(channel, connectionId)));
+    for (const channel of channels) this.leaveChannel(channel, connectionId);
   }
 
-  /** Subscribe this replica to a channel and record local membership. */
+  /** Record channel membership - synchronous now, no subscription to await. */
   async joinChannel(channel: string, connectionId: string): Promise<void> {
     let members = this.channelMembers.get(channel);
     if (!members) {
       members = new Set();
       this.channelMembers.set(channel, members);
-      await redisSubscriber.subscribe(channel);
     }
     members.add(connectionId);
   }
 
-  async leaveChannel(channel: string, connectionId: string): Promise<void> {
+  leaveChannel(channel: string, connectionId: string): void {
     const members = this.channelMembers.get(channel);
     if (!members) return;
     members.delete(connectionId);
-    if (members.size === 0) {
-      this.channelMembers.delete(channel);
-      await redisSubscriber.unsubscribe(channel).catch(() => undefined);
-    }
+    if (members.size === 0) this.channelMembers.delete(channel);
   }
 
-  /** Publish a frame to every socket attached to a channel, on any replica. */
+  /** Deliver a frame to every socket attached to a channel. */
   async publish(channel: string, message: ServerMessage): Promise<void> {
-    await redisPublisher.publish(channel, JSON.stringify(message));
+    this.deliverLocal(channel, JSON.stringify(message));
   }
 
   async sendToDevice(deviceId: string, message: ServerMessage): Promise<void> {
-    await this.publish(REDIS_KEYS.deviceChannel(deviceId), message);
+    await this.publish(KEYS.deviceChannel(deviceId), message);
   }
 
   async sendToSession(sessionId: string, message: ServerMessage): Promise<void> {
-    await this.publish(REDIS_KEYS.sessionChannel(sessionId), message);
+    await this.publish(KEYS.sessionChannel(sessionId), message);
   }
 
-  /** Direct write to a socket held by this replica. */
+  /** Direct write to a socket held by this process. */
   sendDirect(connectionId: string, message: ServerMessage): boolean {
     const connection = this.connections.get(connectionId);
     if (!connection || connection.socket.readyState !== connection.socket.OPEN) return false;
@@ -116,7 +106,7 @@ class SignalingHub {
     return true;
   }
 
-  private deliverLocal({ channel, payload }: Delivery): void {
+  private deliverLocal(channel: string, payload: string): void {
     const members = this.channelMembers.get(channel);
     if (!members) return;
     for (const connectionId of members) {
@@ -128,7 +118,7 @@ class SignalingHub {
     }
   }
 
-  /** Connections held by this replica - exposed for metrics and shutdown. */
+  /** Connections held by this process - exposed for metrics and shutdown. */
   get localConnectionCount(): number {
     return this.connections.size;
   }

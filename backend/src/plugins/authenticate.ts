@@ -52,7 +52,7 @@ function bearerToken(request: FastifyRequest): string | null {
  *
  * Three things are checked on every request, in increasing cost order:
  *   1. signature + expiry + audience  (no I/O)
- *   2. the token id is not on the revocation denylist  (one Redis GET)
+ *   2. the token id is not on the revocation denylist  (in-memory lookup)
  *   3. the AuthSession is still live and the user still exists  (one query)
  *
  * Step 3 is what makes "sign out everywhere" and "revoke this device" take
