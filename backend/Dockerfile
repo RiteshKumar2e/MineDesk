@@ -3,19 +3,26 @@
 # Build from this folder:
 #   cd backend
 #   docker build -t minedesk-backend .
+#
+# Debian slim, not Alpine: @libsql/client's native binary (libsql) has a
+# known ABI incompatibility with musl libc on some releases - it loads but
+# crashes with "Error relocating .../index.node: fcntl64: symbol not found"
+# (musl doesn't have glibc's fcntl64 symbol). The glibc-linked
+# @libsql/linux-x64-gnu binary doesn't have this problem, so this avoids the
+# whole bug class rather than chasing a specific compatible libsql version.
 
-FROM node:22-alpine AS deps
+FROM node:22-slim AS deps
 WORKDIR /app
 # package-lock.json is deliberately NOT copied in: it's generated on whatever
 # OS a developer last ran `npm install` on (Windows, here), so it only has a
 # resolved entry for that platform's @libsql/* native binary. Installing
-# from package.json alone lets npm resolve the *actual* platform-correct
-# optional dependency (@libsql/linux-x64-musl on this Alpine image) fresh
-# every build, instead of reusing a lockfile that doesn't know musl exists.
+# from package.json alone lets npm resolve the actual platform-correct
+# optional dependency (@libsql/linux-x64-gnu on this image) fresh every
+# build, instead of reusing a lockfile that doesn't know about it.
 COPY package.json ./
 RUN npm install --omit=dev
 
-FROM node:22-alpine AS build
+FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json ./
 RUN npm install
@@ -23,10 +30,10 @@ COPY tsconfig.json ./
 COPY src src
 RUN npm run build
 
-FROM node:22-alpine AS runtime
+FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-RUN addgroup -S minedesk && adduser -S minedesk -G minedesk
+RUN groupadd --system minedesk && useradd --system --gid minedesk minedesk
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

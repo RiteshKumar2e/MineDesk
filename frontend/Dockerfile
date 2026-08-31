@@ -11,7 +11,7 @@
 #     --build-arg VITE_WS_URL=wss://api.example.com \
 #     -t minedesk-frontend .
 
-FROM node:22-alpine AS build
+FROM node:22-slim AS build
 WORKDIR /app
 ARG VITE_API_URL=http://localhost:4000
 ARG VITE_WS_URL=ws://localhost:4000
