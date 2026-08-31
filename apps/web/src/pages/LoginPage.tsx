@@ -121,7 +121,7 @@ export default function LoginPage() {
           {submitting ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
-      <p className="mt-5 text-center text-sm text-slate-500 dark:text-slate-400">
+      <p className="mt-5 text-center text-sm text-zinc-500 ">
         Don&apos;t have an account?{' '}
         <Link to="/register" className="font-medium text-brand-600 hover:underline">
           Create one

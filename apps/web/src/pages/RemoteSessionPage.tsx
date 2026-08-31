@@ -521,8 +521,8 @@ export default function RemoteSessionPage() {
   const isInteractive = phase === 'active';
 
   return (
-    <div className="flex h-screen flex-col bg-slate-950 text-slate-100">
-      <header className="flex items-center justify-between border-b border-slate-800 bg-slate-900 px-4 py-2">
+    <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
+      <header className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-4 py-2">
         <div className="flex items-center gap-3">
           <span className="text-sm font-medium">{deviceLabel || 'Remote session'}</span>
           <span
@@ -534,7 +534,7 @@ export default function RemoteSessionPage() {
                   ? 'bg-amber-950 text-amber-300'
                   : phase === 'denied' || phase === 'failed'
                     ? 'bg-red-950 text-red-300'
-                    : 'bg-slate-800 text-slate-300')
+                    : 'bg-zinc-800 text-zinc-300')
             }
           >
             {PHASE_LABEL[phase]}
@@ -565,7 +565,7 @@ export default function RemoteSessionPage() {
             />
           )}
           {hasCapability('audio') && (
-            <div className="flex items-center gap-1 rounded-lg bg-slate-800 px-2 py-1">
+            <div className="flex items-center gap-1 rounded-lg bg-zinc-800 px-2 py-1">
               <button type="button" className="text-sm" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute' : 'Mute'}>
                 {muted ? '\u{1F507}' : '\u{1F50A}'}
               </button>
@@ -605,7 +605,7 @@ export default function RemoteSessionPage() {
         <button
           type="button"
           onClick={() => void handleCopyReceivedClipboard()}
-          className="absolute right-4 top-14 z-10 rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-100 shadow-lg hover:bg-slate-700"
+          className="absolute right-4 top-14 z-10 rounded-lg bg-zinc-800 px-3 py-2 text-xs text-zinc-100 shadow-lg hover:bg-zinc-700"
         >
           {clipboardToast}
         </button>
@@ -622,7 +622,7 @@ export default function RemoteSessionPage() {
         {error && <p className="text-sm text-red-400">{error}</p>}
 
         {!error && phase !== 'active' && phase !== 'reconnecting' && (
-          <p className="text-sm text-slate-400">{PHASE_LABEL[phase]}</p>
+          <p className="text-sm text-zinc-400">{PHASE_LABEL[phase]}</p>
         )}
 
         <video

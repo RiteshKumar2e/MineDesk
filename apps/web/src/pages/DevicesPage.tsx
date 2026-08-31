@@ -52,7 +52,7 @@ export default function DevicesPage() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">My Devices</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+          <p className="text-sm text-zinc-500 ">
             Computers you can remotely access once the agent is installed and authorized.
           </p>
         </div>
@@ -69,7 +69,7 @@ export default function DevicesPage() {
       {showConnect && (
         <div className="card mb-6 p-5">
           <h2 className="mb-1 font-medium">Connect to a device</h2>
-          <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+          <p className="mb-3 text-sm text-zinc-500 ">
             For one of your own devices, use its Connect button below instead. This is for a device someone
             else shared with you - you'll need its ID and the unattended access password they gave you.
           </p>
@@ -155,11 +155,11 @@ export default function DevicesPage() {
           ) : (
             <div>
               <h2 className="mb-2 font-medium">Install the Remote Agent on that computer</h2>
-              <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+              <p className="mb-3 text-sm text-zinc-500 ">
                 Run this command on the target machine. The code expires{' '}
                 {new Date(enrollment.expiresAt).toLocaleTimeString()} and can only be used once.
               </p>
-              <code className="mb-4 block rounded-lg bg-slate-900 px-3 py-2 text-sm text-emerald-300">
+              <code className="mb-4 block rounded-lg bg-zinc-900 px-3 py-2 text-sm text-emerald-300">
                 {enrollment.command}
               </code>
               <button
@@ -177,11 +177,11 @@ export default function DevicesPage() {
         </div>
       )}
 
-      {isLoading && <p className="text-sm text-slate-500">Loading devices...</p>}
+      {isLoading && <p className="text-sm text-zinc-500">Loading devices...</p>}
       {error && <p className="text-sm text-red-600">Could not load devices.</p>}
 
       {data && data.devices.length === 0 && (
-        <div className="card p-10 text-center text-sm text-slate-500 dark:text-slate-400">
+        <div className="card p-10 text-center text-sm text-zinc-500 ">
           No devices yet. Add one to get an installation command for the Remote Agent.
         </div>
       )}
@@ -197,7 +197,7 @@ export default function DevicesPage() {
               <StatusDot online={device.status === 'online'} />
               <span className="font-medium">{device.name}</span>
             </div>
-            <div className="space-y-0.5 text-xs text-slate-500 dark:text-slate-400">
+            <div className="space-y-0.5 text-xs text-zinc-500 ">
               <div>ID: {device.deviceId}</div>
               <div className="capitalize">{device.os}</div>
               <div>
@@ -209,7 +209,7 @@ export default function DevicesPage() {
               </div>
             </div>
             {device.activeSession && (
-              <div className="mt-3 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+              <div className="mt-3 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800  ">
                 Session in progress
               </div>
             )}

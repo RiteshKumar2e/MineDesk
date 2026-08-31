@@ -48,17 +48,39 @@ Ubuntu distro has no `redis-server` installed either). Pick one:
 
 ### Option B - No Docker: Redis inside WSL2
 
-WSL2 itself is already installed on this machine (Ubuntu, default), just
-without Redis yet:
+WSL2 itself is already installed on this machine (Ubuntu, default) and
+Redis is now installed in it too. If you don't remember your WSL Linux
+user's password (separate from your Windows password, set the first time
+WSL launched), skip `sudo` entirely and run as root instead - root needs no
+password:
 
 ```powershell
-wsl -e bash -c "sudo apt update && sudo apt install -y redis-server && sudo service redis-server start"
+wsl -u root -e bash -c "apt update && apt install -y redis-server && service redis-server start"
 ```
 
-It's reachable at `redis://localhost:6379` from Windows once running. To
-start it again after a reboot: `wsl -e bash -c "sudo service redis-server start"`.
+**Known gotcha, already hit and fixed once in this setup**: WSL2 shuts its
+whole lightweight VM down a few seconds after the last attached process
+exits (no terminal, no `wsl.exe` process keeping it alive) - and when the VM
+goes, everything inside it dies too, `redis-server` included, even though it
+was started as a proper background service. You'll see `npm run dev` start
+logging `[ioredis] ECONNREFUSED` again after Redis had been working. Two
+fixes:
+
+- **Quick, per-session**: keep some WSL process attached in the background,
+  e.g. `wsl -u root -e bash -c "service redis-server start && tail -f /dev/null"`
+  left running in its own terminal.
+- **Permanent**: create/edit `%UserProfile%\.wslconfig` with:
+  ```ini
+  [wsl2]
+  vmIdleTimeout=-1
+  ```
+
+  then `wsl --shutdown` and start WSL again - the VM (and anything running
+  as a real service inside it, like Redis) then stays up indefinitely
+  without needing an attached process.
+
 (Or install [Memurai](https://www.memurai.com/), a native Windows
-Redis-protocol-compatible service, instead - no WSL involved.)
+Redis-protocol-compatible service, instead - no WSL, no idle-timeout gotcha.)
 
 **coturn (TURN server)** is separate from Redis and only needed for WebRTC
 when the browser and agent can't reach each other directly (symmetric NAT,
@@ -197,12 +219,12 @@ the device should now show **online** on the dashboard - click it and
 
 - **`npm run dev` logs repeated `[ioredis] Unhandled error event: ECONNREFUSED`**
   - Redis isn't up yet. Do step 2. The API will otherwise start (SQLite
-  doesn't need a service), but presence, session signaling and rate limiting
-  all depend on Redis, so device status and remote sessions won't work
-  without it.
+    doesn't need a service), but presence, session signaling and rate limiting
+    all depend on Redis, so device status and remote sessions won't work
+    without it.
 - **`prisma db push` fails with "Environment variable not found: DATABASE_URL"**
   - `apps/api/prisma/.env` is missing. See step 3's note on why that file
-  exists separately from the root `.env`.
+    exists separately from the root `.env`.
 - **A fresh Prisma-touching script reports "no such table"** even though
   `apps/api/prisma/dev.db` clearly has the schema (check with
   `npx prisma studio` or the query in `lib/prisma.ts`'s comment) - this was

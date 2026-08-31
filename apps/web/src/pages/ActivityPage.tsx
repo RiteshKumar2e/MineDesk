@@ -20,30 +20,30 @@ export default function ActivityPage() {
   return (
     <div>
       <h1 className="mb-1 text-xl font-semibold">Activity</h1>
-      <p className="mb-6 text-sm text-slate-500 dark:text-slate-400">
+      <p className="mb-6 text-sm text-zinc-500 ">
         A record of security-relevant events on your account: sign-ins, device changes, and sessions.
       </p>
 
-      {isLoading && <p className="text-sm text-slate-500">Loading...</p>}
+      {isLoading && <p className="text-sm text-zinc-500">Loading...</p>}
 
-      <div className="card divide-y divide-slate-100 dark:divide-slate-800">
+      <div className="card divide-y divide-zinc-100 ">
         {data?.entries.map((entry) => (
           <div key={entry.id} className="flex items-center justify-between px-5 py-3">
             <div>
               <div className="text-sm font-medium">{entry.label}</div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">
+              <div className="text-xs text-zinc-500 ">
                 {entry.deviceName ? `${entry.deviceName} · ` : ''}
                 {entry.ipAddress ?? 'unknown IP'}
                 {entry.sessionId ? ` · ${entry.sessionId}` : ''}
               </div>
             </div>
-            <div className="whitespace-nowrap text-xs text-slate-400">
+            <div className="whitespace-nowrap text-xs text-zinc-400">
               {new Date(entry.createdAt).toLocaleString()}
             </div>
           </div>
         ))}
         {data?.entries.length === 0 && (
-          <div className="px-5 py-10 text-center text-sm text-slate-500 dark:text-slate-400">
+          <div className="px-5 py-10 text-center text-sm text-zinc-500 ">
             No activity recorded yet.
           </div>
         )}

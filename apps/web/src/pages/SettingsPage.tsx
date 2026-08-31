@@ -9,7 +9,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="mb-1 text-xl font-semibold">Settings</h1>
-        <p className="text-sm text-slate-500 dark:text-slate-400">Manage your account and its security options.</p>
+        <p className="text-sm text-zinc-500 ">Manage your account and its security options.</p>
       </div>
 
       <ChangePasswordCard />
@@ -141,7 +141,7 @@ function TwoFactorCard({ enabled, onChange }: { enabled: boolean; onChange: () =
             Two-factor authentication is enabled. Save these backup codes somewhere safe - each works once if you
             lose access to your authenticator app.
           </p>
-          <div className="grid grid-cols-2 gap-2 rounded-lg bg-slate-900 p-4 font-mono text-sm text-emerald-300">
+          <div className="grid grid-cols-2 gap-2 rounded-lg bg-zinc-900 p-4 font-mono text-sm text-emerald-300">
             {backupCodes.map((c) => (
               <div key={c}>{c}</div>
             ))}
@@ -149,7 +149,7 @@ function TwoFactorCard({ enabled, onChange }: { enabled: boolean; onChange: () =
         </div>
       ) : enabled ? (
         <div>
-          <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+          <p className="mb-3 text-sm text-zinc-500 ">
             Two-factor authentication is currently enabled on your account.
           </p>
           <form onSubmit={disable} className="max-w-sm space-y-3">
@@ -185,11 +185,11 @@ function TwoFactorCard({ enabled, onChange }: { enabled: boolean; onChange: () =
         </div>
       ) : setupData ? (
         <form onSubmit={confirmSetup} className="max-w-sm space-y-3">
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+          <p className="text-sm text-zinc-500 ">
             Scan this QR code with your authenticator app, then enter the six-digit code it shows.
           </p>
           <img src={setupData.qrCode} alt="Two-factor QR code" className="h-40 w-40 rounded-lg border" />
-          <p className="text-xs text-slate-400">Or enter this key manually: {setupData.secret}</p>
+          <p className="text-xs text-zinc-400">Or enter this key manually: {setupData.secret}</p>
           <div>
             <label className="label" htmlFor="totp-code">
               Verification code
@@ -210,7 +210,7 @@ function TwoFactorCard({ enabled, onChange }: { enabled: boolean; onChange: () =
         </form>
       ) : (
         <div>
-          <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+          <p className="mb-3 text-sm text-zinc-500 ">
             Add an authenticator app as a second factor when signing in.
           </p>
           <button type="button" className="btn-primary" onClick={() => void startSetup()}>

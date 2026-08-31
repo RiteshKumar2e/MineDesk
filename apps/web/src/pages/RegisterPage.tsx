@@ -80,14 +80,14 @@ export default function RegisterPage() {
           {fieldErrors.password ? (
             <p className="mt-1 text-xs text-red-600">{fieldErrors.password}</p>
           ) : (
-            <p className="mt-1 text-xs text-slate-400">At least 12 characters.</p>
+            <p className="mt-1 text-xs text-zinc-400">At least 12 characters.</p>
           )}
         </div>
         <button type="submit" className="btn-primary w-full" disabled={submitting}>
           {submitting ? 'Creating account...' : 'Create account'}
         </button>
       </form>
-      <p className="mt-5 text-center text-sm text-slate-500 dark:text-slate-400">
+      <p className="mt-5 text-center text-sm text-zinc-500 ">
         Already have an account?{' '}
         <Link to="/login" className="font-medium text-brand-600 hover:underline">
           Sign in

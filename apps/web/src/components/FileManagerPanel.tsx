@@ -274,29 +274,29 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
   const breadcrumbs = path.split('/').filter(Boolean);
 
   return (
-    <div className="absolute inset-y-0 right-0 flex w-96 flex-col border-l border-slate-800 bg-slate-900 text-slate-100 shadow-xl">
-      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+    <div className="absolute inset-y-0 right-0 flex w-96 flex-col border-l border-zinc-800 bg-zinc-900 text-zinc-100 shadow-xl">
+      <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
         <h2 className="text-sm font-semibold">Files</h2>
-        <button type="button" className="btn-ghost !text-slate-300" onClick={onClose}>
+        <button type="button" className="btn-ghost !text-zinc-300" onClick={onClose}>
           Close
         </button>
       </div>
 
-      <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-2 text-xs text-slate-400">
+      <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2 text-xs text-zinc-400">
         <button type="button" className="hover:text-white disabled:opacity-30" onClick={navigateUp} disabled={breadcrumbs.length === 0}>
           &uarr; Up
         </button>
         <span className="truncate">/{breadcrumbs.join('/')}</span>
       </div>
 
-      <div className="flex gap-2 border-b border-slate-800 px-4 py-2">
+      <div className="flex gap-2 border-b border-zinc-800 px-4 py-2">
         {canUpload && (
-          <button type="button" className="btn-secondary !bg-slate-800 !text-slate-100" onClick={handleUploadClick}>
+          <button type="button" className="btn-secondary !bg-zinc-800 !text-zinc-100" onClick={handleUploadClick}>
             Upload
           </button>
         )}
         {canUpload && (
-          <button type="button" className="btn-secondary !bg-slate-800 !text-slate-100" onClick={handleCreateFolder}>
+          <button type="button" className="btn-secondary !bg-zinc-800 !text-zinc-100" onClick={handleCreateFolder}>
             New folder
           </button>
         )}
@@ -306,7 +306,7 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
       {error && <div className="border-b border-red-900 bg-red-950 px-4 py-2 text-xs text-red-300">{error}</div>}
 
       {transfer && (
-        <div className="border-b border-slate-800 px-4 py-3 text-xs">
+        <div className="border-b border-zinc-800 px-4 py-3 text-xs">
           <div className="mb-1 flex items-center justify-between">
             <span className="truncate font-medium">
               {transfer.direction === 'upload' ? 'Uploading' : 'Downloading'} {transfer.fileName}
@@ -317,7 +317,7 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
               </button>
             )}
           </div>
-          <div className="mb-1 h-1.5 overflow-hidden rounded-full bg-slate-800">
+          <div className="mb-1 h-1.5 overflow-hidden rounded-full bg-zinc-800">
             <div
               className="h-full bg-brand-500 transition-all"
               style={{ width: `${transfer.size ? Math.min(100, (transfer.transferredBytes / transfer.size) * 100) : 0}%` }}
@@ -329,11 +329,11 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
 
       <div className="flex-1 overflow-y-auto">
         {entries === null ? (
-          <p className="p-4 text-xs text-slate-500">Loading...</p>
+          <p className="p-4 text-xs text-zinc-500">Loading...</p>
         ) : entries.length === 0 ? (
-          <p className="p-4 text-xs text-slate-500">This folder is empty.</p>
+          <p className="p-4 text-xs text-zinc-500">This folder is empty.</p>
         ) : (
-          <ul className="divide-y divide-slate-800">
+          <ul className="divide-y divide-zinc-800">
             {entries.map((entry) => (
               <li key={entry.name} className="flex items-center justify-between px-4 py-2 text-sm">
                 <button
@@ -345,7 +345,7 @@ export function FileManagerPanel({ channel, canUpload, canDownload, canDelete, o
                   <span aria-hidden>{entry.isDirectory ? '\u{1F4C1}' : '\u{1F4C4}'}</span>
                   <span className="truncate">{entry.name}</span>
                 </button>
-                <div className="flex shrink-0 items-center gap-2 text-xs text-slate-500">
+                <div className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
                   {!entry.isDirectory && <span>{formatBytes(entry.size)}</span>}
                   {!entry.isDirectory && canDownload && (
                     <button type="button" className="hover:text-brand-400" onClick={() => handleDownload(entry)}>
@@ -378,7 +378,7 @@ function TransferStats({ transfer }: { transfer: TransferState }) {
   const remaining = speed > 0 ? (transfer.size - transfer.transferredBytes) / speed : 0;
 
   return (
-    <div className="flex justify-between text-slate-400">
+    <div className="flex justify-between text-zinc-400">
       <span>
         {formatBytes(transfer.transferredBytes)} / {formatBytes(transfer.size)}
       </span>

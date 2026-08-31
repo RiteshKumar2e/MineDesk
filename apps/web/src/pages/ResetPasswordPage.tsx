@@ -65,7 +65,7 @@ export default function ResetPasswordPage() {
             value={password}
             onChange={(e) => setPassword(e.target.value)}
           />
-          <p className="mt-1 text-xs text-slate-400">At least 12 characters.</p>
+          <p className="mt-1 text-xs text-zinc-400">At least 12 characters.</p>
         </div>
         <button type="submit" className="btn-primary w-full" disabled={submitting}>
           {submitting ? 'Saving...' : 'Save new password'}

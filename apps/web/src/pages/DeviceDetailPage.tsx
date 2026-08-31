@@ -48,7 +48,7 @@ export default function DeviceDetailPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [newFolder, setNewFolder] = useState('');
 
-  if (isLoading) return <p className="text-sm text-slate-500">Loading device...</p>;
+  if (isLoading) return <p className="text-sm text-zinc-500">Loading device...</p>;
   if (error || !data) return <p className="text-sm text-red-600">That device could not be found.</p>;
 
   const { device } = data;
@@ -140,7 +140,7 @@ export default function DeviceDetailPage() {
 
   return (
     <div>
-      <Link to="/devices" className="mb-4 inline-block text-sm text-slate-500 hover:underline">
+      <Link to="/devices" className="mb-4 inline-block text-sm text-zinc-500 hover:underline">
         &larr; All devices
       </Link>
 
@@ -169,7 +169,7 @@ export default function DeviceDetailPage() {
             {!renaming && (
               <button
                 type="button"
-                className="text-xs text-slate-400 hover:text-slate-600"
+                className="text-xs text-zinc-400 hover:text-zinc-600"
                 onClick={() => {
                   setNameDraft(device.name);
                   setRenaming(true);
@@ -179,7 +179,7 @@ export default function DeviceDetailPage() {
               </button>
             )}
           </div>
-          <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          <div className="mt-1 text-sm text-zinc-500 ">
             ID: {device.deviceId} &middot; <span className="capitalize">{device.os}</span>
             {device.osVersion ? ` ${device.osVersion}` : ''}
           </div>
@@ -202,7 +202,7 @@ export default function DeviceDetailPage() {
       </div>
 
       {actionError && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700   ">
           {actionError}
         </div>
       )}
@@ -214,7 +214,7 @@ export default function DeviceDetailPage() {
             <div className="space-y-5">
               {CAPABILITY_GROUPS.map((group) => (
                 <div key={group.label}>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
                     {group.label}
                   </h3>
                   <div className="space-y-2">
@@ -222,13 +222,13 @@ export default function DeviceDetailPage() {
                       <label key={capability} className="flex items-start gap-3">
                         <input
                           type="checkbox"
-                          className="mt-0.5 h-4 w-4 rounded border-slate-300"
+                          className="mt-0.5 h-4 w-4 rounded border-zinc-300"
                           checked={device.permissions[capability]}
                           onChange={(e) => void togglePermission(capability, e.target.checked)}
                         />
                         <span>
                           <span className="block text-sm font-medium">{CAPABILITY_LABELS[capability]}</span>
-                          <span className="block text-xs text-slate-500 dark:text-slate-400">
+                          <span className="block text-xs text-zinc-500 ">
                             {CAPABILITY_DESCRIPTIONS[capability]}
                           </span>
                         </span>
@@ -240,15 +240,15 @@ export default function DeviceDetailPage() {
             </div>
 
             {(device.permissions.fileUpload || device.permissions.fileDownload || device.permissions.fileDelete) && (
-              <div className="mt-5 border-t border-slate-100 pt-4 dark:border-slate-800">
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Shared folders</h3>
-                <p className="mb-2 text-xs text-slate-500 dark:text-slate-400">
+              <div className="mt-5 border-t border-zinc-100 pt-4 ">
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">Shared folders</h3>
+                <p className="mb-2 text-xs text-zinc-500 ">
                   Absolute paths on this computer the file manager is allowed to browse. Nothing outside these
                   folders is reachable from a remote session.
                 </p>
                 <ul className="mb-2 space-y-1">
                   {(data.sharedFolders ?? []).map((folder) => (
-                    <li key={folder} className="flex items-center justify-between rounded bg-slate-50 px-2 py-1 text-sm dark:bg-slate-800">
+                    <li key={folder} className="flex items-center justify-between rounded bg-zinc-50 px-2 py-1 text-sm ">
                       <span className="truncate font-mono text-xs">{folder}</span>
                       <button type="button" className="text-xs text-red-600 hover:underline" onClick={() => void removeSharedFolder(folder)}>
                         Remove
@@ -256,7 +256,7 @@ export default function DeviceDetailPage() {
                     </li>
                   ))}
                   {(data.sharedFolders ?? []).length === 0 && (
-                    <li className="text-xs text-slate-400">No folders shared yet.</li>
+                    <li className="text-xs text-zinc-400">No folders shared yet.</li>
                   )}
                 </ul>
                 <div className="flex gap-2">
@@ -277,24 +277,24 @@ export default function DeviceDetailPage() {
           <section className="card p-5">
             <h2 className="mb-3 font-medium">Access history</h2>
             {!sessionsData || sessionsData.sessions.length === 0 ? (
-              <p className="text-sm text-slate-500 dark:text-slate-400">No sessions yet.</p>
+              <p className="text-sm text-zinc-500 ">No sessions yet.</p>
             ) : (
-              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+              <ul className="divide-y divide-zinc-100 ">
                 {sessionsData.sessions.map((session) => (
                   <li key={session.id} className="py-2.5 text-sm">
                     <div className="flex items-center justify-between">
                       <div>
                         <div className="font-medium">
-                          {session.userName} <span className="font-normal text-slate-400">({session.userEmail})</span>
+                          {session.userName} <span className="font-normal text-zinc-400">({session.userEmail})</span>
                         </div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                        <div className="text-xs text-zinc-500 ">
                           {new Date(session.startedAt).toLocaleString()}
                           {session.durationMs !== null && ` · ${formatDuration(session.durationMs)}`}
                           {session.unattended && ' · unattended'}
                           {session.connectionType && ` · ${session.connectionType}`}
                         </div>
                       </div>
-                      <span className="badge bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                      <span className="badge bg-zinc-100 text-zinc-600  ">
                         {session.status}
                       </span>
                     </div>
@@ -316,18 +316,18 @@ export default function DeviceDetailPage() {
           {accessData && accessData.recentConnections.length > 0 && (
             <section className="card p-5">
               <h2 className="mb-1 font-medium">Connected via access password</h2>
-              <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+              <p className="mb-3 text-sm text-zinc-500 ">
                 These accounts are not owners of this device - they connected using the unattended access
                 password. Change the password to revoke their access.
               </p>
-              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+              <ul className="divide-y divide-zinc-100 ">
                 {accessData.recentConnections.map((conn) => (
                   <li key={conn.id} className="flex items-center justify-between py-2 text-sm">
                     <div>
                       <div className="font-medium">{conn.name}</div>
-                      <div className="text-xs text-slate-500 dark:text-slate-400">{conn.email}</div>
+                      <div className="text-xs text-zinc-500 ">{conn.email}</div>
                     </div>
-                    <div className="text-right text-xs text-slate-500 dark:text-slate-400">
+                    <div className="text-right text-xs text-zinc-500 ">
                       <div>{conn.sessionCount} session{conn.sessionCount === 1 ? '' : 's'}</div>
                       <div>{conn.lastConnectedAt ? new Date(conn.lastConnectedAt).toLocaleDateString() : ''}</div>
                     </div>
@@ -341,7 +341,7 @@ export default function DeviceDetailPage() {
         <div className="space-y-6">
           <section className="card p-5">
             <h2 className="mb-3 font-medium">Unattended access</h2>
-            <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+            <p className="mb-3 text-sm text-zinc-500 ">
               Allow connecting to this device without someone present to approve each session.
             </p>
             <div className="mb-3 flex items-center justify-between">
@@ -353,7 +353,7 @@ export default function DeviceDetailPage() {
               </button>
             </div>
             {showUnattendedForm && (
-              <div className="space-y-2 border-t border-slate-100 pt-3 dark:border-slate-800">
+              <div className="space-y-2 border-t border-zinc-100 pt-3 ">
                 <label className="label" htmlFor="unattended-password">
                   Access password
                 </label>
@@ -373,14 +373,14 @@ export default function DeviceDetailPage() {
 
           <section className="card p-5">
             <h2 className="mb-3 font-medium">Agent enrollment</h2>
-            <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+            <p className="mb-3 text-sm text-zinc-500 ">
               Reinstalling the agent, or moving it to a new machine, needs a fresh one-time code.
             </p>
             <button type="button" className="btn-secondary w-full" onClick={() => void handleIssueCode()}>
               Generate new code
             </button>
             {newCode && (
-              <code className="mt-3 block rounded-lg bg-slate-900 px-3 py-2 text-xs text-emerald-300">
+              <code className="mt-3 block rounded-lg bg-zinc-900 px-3 py-2 text-xs text-emerald-300">
                 {newCode.command}
               </code>
             )}
@@ -388,7 +388,7 @@ export default function DeviceDetailPage() {
 
           <section className="card p-5">
             <h2 className="mb-3 font-medium text-red-600">Revoke access</h2>
-            <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
+            <p className="mb-3 text-sm text-zinc-500 ">
               Immediately signs the agent out and ends any active session. The device stays listed and can be
               re-enrolled with a new code.
             </p>

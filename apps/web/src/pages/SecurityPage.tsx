@@ -29,26 +29,26 @@ export default function SecurityPage() {
   return (
     <div>
       <h1 className="mb-1 text-xl font-semibold">Security</h1>
-      <p className="mb-6 text-sm text-slate-500 dark:text-slate-400">
+      <p className="mb-6 text-sm text-zinc-500 ">
         Browsers currently signed in to your account. Revoke any you don&apos;t recognize.
       </p>
 
       {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
-      {isLoading && <p className="text-sm text-slate-500">Loading...</p>}
+      {isLoading && <p className="text-sm text-zinc-500">Loading...</p>}
 
-      <div className="card divide-y divide-slate-100 dark:divide-slate-800">
+      <div className="card divide-y divide-zinc-100 ">
         {data?.sessions.map((session) => (
           <div key={session.id} className="flex items-center justify-between px-5 py-3">
             <div>
               <div className="text-sm font-medium">
                 {session.userAgent ?? 'Unknown browser'}
                 {session.current && (
-                  <span className="badge ml-2 bg-brand-50 text-brand-700 dark:bg-brand-950 dark:text-brand-300">
+                  <span className="badge ml-2 bg-brand-50 text-brand-700  ">
                     This device
                   </span>
                 )}
               </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">
+              <div className="text-xs text-zinc-500 ">
                 {session.ipAddress ?? 'unknown IP'} &middot; last active{' '}
                 {new Date(session.lastUsedAt).toLocaleString()}
               </div>

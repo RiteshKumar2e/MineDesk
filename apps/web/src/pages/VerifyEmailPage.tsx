@@ -34,7 +34,7 @@ export default function VerifyEmailPage() {
 
   return (
     <AuthShell title="Verify your email">
-      {status === 'checking' && <p className="text-sm text-slate-500">Verifying...</p>}
+      {status === 'checking' && <p className="text-sm text-zinc-500">Verifying...</p>}
       {status === 'ok' && (
         <>
           <SuccessNotice message="Your email address is verified." />
