@@ -10,9 +10,6 @@ and camera/microphone each require explicit, revocable authorization, and the
 person at the remote machine always sees a visible indicator and a way to
 disconnect.
 
-**Live**: [minedesk.vercel.app](https://minedesk.vercel.app) (frontend) ·
-`https://minedesk.onrender.com` (API)
-
 ## What it does
 
 - **Windows desktop app** (`frontend/src-tauri`) - install `MineDeskSetup.exe`
@@ -188,9 +185,10 @@ backend; any static host works for the frontend.
   `AGENT_JWT_SECRET`, `ENCRYPTION_KEY`, `WEB_ORIGIN` (comma-separated if you
   need to allow more than one origin, e.g. a Vercel deploy and localhost),
   `API_PUBLIC_URL` (the API's own public HTTPS URL - used in URLs it hands
-  back to the agent), and `AGENT_DOWNLOAD_URL` (where the compiled
+  back to the agent), `AGENT_DOWNLOAD_URL` (where the compiled
   `minedesk-agent.exe` is hosted - a GitHub Release asset works fine; the API
-  redirects there rather than serving the binary itself).
+  redirects there rather than serving the binary itself), and
+  `DESKTOP_DOWNLOAD_URL` (same idea, for the desktop app's installer).
 - **Database**: create a Turso database, then apply `backend/db/schema.sql`
   to it directly (`turso db shell <name> < backend/db/schema.sql`, or any
   libSQL client that can run a SQL file) before the API's first request -
@@ -216,9 +214,21 @@ website. On launch it spawns the compiled Windows agent as a background
 sidecar process, which self-registers and persists its identity to
 `%ProgramData%\MineDesk\agent.toml` exactly as the standalone agent does -
 the app then reads that file to show a **permanent** device address, unlike
-the browser flow's fresh-every-tab one. Closing the window stops the agent;
-the tray icon (Open/New Session/My Address/Settings/Quit) is the other way
-in and out.
+the browser flow's fresh-every-tab one.
+
+- Closing the window hides it to the system tray rather than exiting -
+  the agent keeps running so the machine stays reachable, the same way
+  AnyDesk/TeamViewer behave. The tray icon (Open/New Session/My
+  Address/Settings/Quit) is the way back in, and **Quit MineDesk** is what
+  actually stops the agent and exits.
+- A gear icon in the dashboard header (desktop app only) opens a small
+  Settings panel with one real toggle so far: **Start MineDesk when Windows
+  starts**, backed by `tauri-plugin-autostart` (an actual Windows Run-key
+  entry, not a placeholder).
+- The web UI's `GET /api/v1/agent/download-desktop` (redirects to
+  `DESKTOP_DOWNLOAD_URL`, same pattern as `AGENT_DOWNLOAD_URL` below) is
+  what a **Download for Windows** button points at; it's hidden when the
+  page is already running inside the desktop app.
 
 Build it from `frontend/`:
 
@@ -236,10 +246,10 @@ before building (Tauri's sidecar naming convention). Output:
 - `frontend/src-tauri/target/release/bundle/nsis/MineDesk_<version>_x64-setup.exe` (recommended installer)
 - `frontend/src-tauri/target/release/bundle/msi/MineDesk_<version>_x64_en-US.msi`
 
-**Known gaps**: no Settings UI yet (so "minimize to tray and stay reachable"
-isn't a real toggle - closing the window always stops the agent), no
-auto-update, and the remote-session toolbar (chat, recording, whiteboard,
-etc.) doesn't exist for either the browser or desktop flow yet.
+**Known gaps**: Settings has only the one toggle above (no Display/Remote
+Control/Privacy/Network sections), no auto-update, and the remote-session
+toolbar (chat, recording, whiteboard, etc.) doesn't exist for either the
+browser or desktop flow yet.
 
 ## Known limitations
 
