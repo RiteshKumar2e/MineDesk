@@ -3,6 +3,7 @@ name = "minedesk-agent"
 version = "0.1.0"
 edition = "2021"
 description = "MineDesk Remote Agent - authorized remote desktop access for Windows"
+license = "MIT"
 default-run = "minedesk-agent"
 
 [[bin]]
