@@ -9,6 +9,13 @@ import { useCreateSession } from '../lib/sessionQueries';
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:4000';
 
+// Set only when this page is rendered inside the MineDesk desktop app's
+// webview (see frontend/src-tauri), never in an ordinary browser tab.
+// window.__TAURI_INTERNALS__ is injected by the Tauri runtime itself, so
+// this is a reliable way to tell the two hosts apart without an env var
+// baked in at build time (the same web build runs in both places).
+const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
 function InfoIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -23,6 +30,15 @@ function LockIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <rect x="4" y="11" width="16" height="9" rx="2" />
       <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
     </svg>
   );
 }
@@ -139,6 +155,9 @@ export default function QuickConnectPage() {
   const [incoming, setIncoming] = useState<{ sessionId: string; from: string } | null>(null);
   const [sharing, setSharing] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null);
+  const remoteAddressInputRef = useRef<HTMLInputElement>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -250,7 +269,46 @@ export default function QuickConnectPage() {
 
   // Register "Your Address" the moment the page loads - no click needed for
   // the id itself, only for actually granting screen access later.
+  //
+  // Inside the desktop app this page does not register anything itself: the
+  // bundled minedesk-agent sidecar (frontend/src-tauri/src/lib.rs) already
+  // self-registers a real, full-control device and keeps its identity in
+  // %ProgramData%\MineDesk\agent.toml, which is what should persist across
+  // launches (see backend/agent/src/config.rs). Registering a second,
+  // ephemeral "os: browser" device here as well - as this effect does for a
+  // plain browser tab - would just show the wrong, view-only, throwaway
+  // address as "Your Address" and leave the real one invisible.
   useEffect(() => {
+    if (isTauriApp) {
+      let cancelled = false;
+      let attempts = 0;
+
+      async function pollSidecarIdentity() {
+        const { invoke } = await import('@tauri-apps/api/core');
+        while (!cancelled && attempts < 30) {
+          attempts += 1;
+          try {
+            const identity = await invoke<{ device_id: string | null }>('get_device_identity');
+            if (identity.device_id) {
+              if (!cancelled) setMyAddress(identity.device_id);
+              return;
+            }
+          } catch {
+            // sidecar not reachable yet - keep retrying below
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        if (!cancelled) {
+          setShareError('Could not reach the MineDesk agent - try restarting the app.');
+        }
+      }
+
+      void pollSidecarIdentity();
+      return () => {
+        cancelled = true;
+      };
+    }
+
     closingRef.current = false;
     let cancelled = false;
 
@@ -304,6 +362,40 @@ export default function QuickConnectPage() {
     // page loads, never reused.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The tray's "Settings" menu item (frontend/src-tauri/src/lib.rs) has no
+  // window of its own - it just asks this page to open the same panel the
+  // header's gear icon does.
+  useEffect(() => {
+    if (!isTauriApp) return;
+    const unlisteners: Array<() => void> = [];
+    void import('@tauri-apps/api/event').then(({ listen }) => {
+      void listen('tray:settings', () => setShowSettings(true)).then((fn) => unlisteners.push(fn));
+      void listen('tray:new-session', () => remoteAddressInputRef.current?.focus()).then((fn) => unlisteners.push(fn));
+    });
+    return () => unlisteners.forEach((fn) => fn());
+  }, []);
+
+  async function openSettings() {
+    setShowSettings(true);
+    if (!isTauriApp) return;
+    const { invoke } = await import('@tauri-apps/api/core');
+    try {
+      setAutostartEnabled(await invoke<boolean>('is_autostart_enabled'));
+    } catch {
+      setAutostartEnabled(null);
+    }
+  }
+
+  async function toggleAutostart(enabled: boolean) {
+    setAutostartEnabled(enabled);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_autostart_enabled', { enabled });
+    } catch {
+      setAutostartEnabled(!enabled);
+    }
+  }
 
   async function acceptIncoming() {
     if (!incoming) return;
@@ -371,12 +463,51 @@ export default function QuickConnectPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-zinc-50 to-brand-50/40 px-4 py-10">
-      <div className="mx-auto mb-8 flex max-w-3xl items-center justify-center gap-2.5">
+      <div className="relative mx-auto mb-8 flex max-w-3xl items-center justify-center gap-2.5">
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 font-display text-sm font-bold text-white shadow-sm">
           M
         </div>
         <span className="font-display text-xl font-bold tracking-tight text-zinc-900">MineDesk</span>
+        {isTauriApp && (
+          <button
+            type="button"
+            className="absolute right-0 rounded-full p-2 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600"
+            aria-label="Settings"
+            onClick={openSettings}
+          >
+            <GearIcon />
+          </button>
+        )}
       </div>
+
+      {showSettings && (
+        <div className="fixed inset-0 z-20 flex items-center justify-center bg-zinc-900/40 px-4" onClick={() => setShowSettings(false)}>
+          <div className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold text-zinc-900">Settings</h2>
+
+            <label className="mt-4 flex items-center justify-between gap-4">
+              <span className="text-sm text-zinc-700">Start MineDesk when Windows starts</span>
+              <input
+                type="checkbox"
+                checked={autostartEnabled ?? false}
+                disabled={autostartEnabled === null}
+                onChange={(e) => void toggleAutostart(e.target.checked)}
+                className="h-4 w-4 accent-brand-600"
+              />
+            </label>
+
+            <p className="mt-4 text-xs text-zinc-500">
+              Closing this window keeps MineDesk running in the background so this computer stays
+              reachable. Use <span className="font-medium">Quit MineDesk</span> from the tray icon to
+              exit completely.
+            </p>
+
+            <button type="button" className="btn-secondary mt-5 w-full" onClick={() => setShowSettings(false)}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="mx-auto grid max-w-3xl gap-4 md:grid-cols-2">
         <div className="card p-6">
@@ -404,8 +535,9 @@ export default function QuickConnectPage() {
                   </button>
                   {showInfo && (
                     <div className="absolute left-0 top-full z-10 mt-2 w-64 rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-600 shadow-lg">
-                      Anyone with this address can request to view your screen. You will get a prompt to
-                      approve it - this address stops working the moment you close this tab.
+                      {isTauriApp
+                        ? 'Anyone with this address can request to connect to this computer. This is your permanent MineDesk address - it stays the same every time you open the app.'
+                        : 'Anyone with this address can request to view your screen. You will get a prompt to approve it - this address stops working the moment you close this tab.'}
                     </div>
                   )}
                   <LockIcon />
@@ -415,11 +547,12 @@ export default function QuickConnectPage() {
                 </button>
               </div>
               <p className="mt-2 text-xs text-zinc-400">
-                Share this so someone can view your screen. This address only lasts as long as this tab
-                stays open.
+                {isTauriApp
+                  ? 'Share this so someone can connect to this computer. Incoming requests are handled by the MineDesk agent running in the background.'
+                  : 'Share this so someone can view your screen. This address only lasts as long as this tab stays open.'}
               </p>
 
-              {incoming && (
+              {!isTauriApp && incoming && (
                 <div className="mt-4 rounded-xl border border-brand-200 bg-brand-50 p-4">
                   <p className="text-sm font-medium text-zinc-900">{incoming.from || 'Someone'} wants to view your screen.</p>
                   <div className="mt-3 flex gap-2">
@@ -433,7 +566,7 @@ export default function QuickConnectPage() {
                 </div>
               )}
 
-              {sharing && (
+              {!isTauriApp && sharing && (
                 <>
                   <p className="mt-4 text-xs font-medium text-emerald-600">● Sharing your screen</p>
                   <video ref={videoRef} autoPlay muted playsInline className="mt-2 w-full rounded-lg bg-zinc-900" />
@@ -448,6 +581,7 @@ export default function QuickConnectPage() {
           <p className="mt-1 text-sm text-zinc-500">Enter the address someone shared with you.</p>
           <form onSubmit={handleConnect} className="mt-4 space-y-3">
             <input
+              ref={remoteAddressInputRef}
               className="input font-mono text-lg tabular-nums"
               placeholder="552 246 274"
               inputMode="numeric"

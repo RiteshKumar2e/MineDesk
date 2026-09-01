@@ -15,20 +15,28 @@ disconnect.
 
 ## What it does
 
-- **Instant browser connect** - open the site and you get a random 9-digit
-  address for that tab (like AnyDesk's "Your Address"), shareable so someone
-  else can view your screen with no account and no install. The address dies
-  with the tab; nothing persists server-side once the WebSocket closes.
-- **Account + managed devices** - registered users can install the Windows
-  agent on a machine, name it, and get a stable device ID they can connect to
-  any time (online/offline, unattended access, permissions, activity/audit
-  history), the same way AnyDesk's "This Desk" flow works.
+- **Windows desktop app** (`frontend/src-tauri`) - install `MineDeskSetup.exe`
+  and get a real native window (Start Menu shortcut, taskbar/Task Manager
+  entry, system tray, uninstall entry), not a browser tab. It bundles the
+  Windows Remote Agent as a background process, so a single install both
+  shows the dashboard and makes the machine reachable with a permanent
+  device ID - no separate "download the agent" step.
+- **Instant browser connect** - without installing anything, open the site
+  and you get a random 9-digit address for that tab (like AnyDesk's "Your
+  Address"), shareable so someone else can view your screen with no account.
+  The address dies with the tab; nothing persists server-side once the
+  WebSocket closes.
+- **Account + managed devices** - registered users can install the desktop
+  app or the standalone agent on a machine, name it, and get a stable device
+  ID they can connect to any time (online/offline, unattended access,
+  permissions, activity/audit history), the same way AnyDesk's "This Desk"
+  flow works.
 - **Full remote control from the agent** - screen video, mouse/keyboard
   input, clipboard sync, file transfer, remote audio, and camera/microphone
-  (each independently permission-gated and consent-prompted). A pure browser
-  connection (no agent installed) is intentionally **view-only** - a web page
-  cannot inject OS-level input or read another machine's clipboard/files, so
-  full control always requires the agent.
+  (each independently permission-gated by the owner's dashboard settings). A
+  pure browser connection (no agent installed) is intentionally **view-only**
+  - a web page cannot inject OS-level input or read another machine's
+  clipboard/files, so full control always requires the agent.
 - **Everything else you'd expect**: 2FA, session management, unattended
   access passwords with lockout, per-device permission masks, and a full
   audit trail.
@@ -65,8 +73,11 @@ of code both sides need (types, wire protocol, permission defaults) under
 
 ```
 frontend/
-  src/         React + Vite + Tailwind web client
+  src/         React + Vite + Tailwind web client (same code runs in the browser and in the desktop app below)
   src/vendor/  types, protocol, shared - vendored copy (see backend/'s)
+  src-tauri/   Windows desktop app shell (Tauri/Rust) - wraps src/ in a native
+               window and bundles the compiled agent as a background sidecar;
+               see Desktop app below
   Dockerfile   standalone nginx static build (optional; Vercel is primary)
   vercel.json  SPA rewrite rule
 backend/
@@ -192,9 +203,43 @@ backend; any static host works for the frontend.
 ## Windows agent
 
 See [backend/agent/README.md](backend/agent/README.md) for what it captures,
-how to build it, and known limitations. The compiled binary is what
-**Download Agent** in the web UI serves (via `AGENT_DOWNLOAD_URL`); building
-it yourself only matters if you're changing agent code.
+how to build it, and known limitations. It's a headless console program with
+no window of its own - the compiled binary is what **Download Agent** in the
+web UI serves standalone (via `AGENT_DOWNLOAD_URL`), and it's also what the
+desktop app below bundles and runs in the background automatically.
+
+## Desktop app
+
+`frontend/src-tauri` wraps the same React frontend in a native Windows
+window using [Tauri](https://tauri.app) instead of shipping it only as a
+website. On launch it spawns the compiled Windows agent as a background
+sidecar process, which self-registers and persists its identity to
+`%ProgramData%\MineDesk\agent.toml` exactly as the standalone agent does -
+the app then reads that file to show a **permanent** device address, unlike
+the browser flow's fresh-every-tab one. Closing the window stops the agent;
+the tray icon (Open/New Session/My Address/Settings/Quit) is the other way
+in and out.
+
+Build it from `frontend/`:
+
+```bash
+npm run dev:desktop     # live-reload native window against the Vite dev server
+npm run build:desktop   # release build + Windows installers
+```
+
+`npm run build:desktop` needs a Rust toolchain (see
+`backend/agent/rust-env.ps1` for the MSVC/WebView2 setup this project uses)
+and a compiled agent at `backend/agent/target/release/minedesk-agent.exe`,
+copied into `frontend/src-tauri/binaries/minedesk-agent-x86_64-pc-windows-msvc.exe`
+before building (Tauri's sidecar naming convention). Output:
+
+- `frontend/src-tauri/target/release/bundle/nsis/MineDesk_<version>_x64-setup.exe` (recommended installer)
+- `frontend/src-tauri/target/release/bundle/msi/MineDesk_<version>_x64_en-US.msi`
+
+**Known gaps**: no Settings UI yet (so "minimize to tray and stay reachable"
+isn't a real toggle - closing the window always stops the agent), no
+auto-update, and the remote-session toolbar (chat, recording, whiteboard,
+etc.) doesn't exist for either the browser or desktop flow yet.
 
 ## Known limitations
 
