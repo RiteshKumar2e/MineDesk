@@ -240,16 +240,37 @@ async fn reconnect_signaling(
 }
 
 async fn run(api_url: &str) -> Result<()> {
-    let config = match AgentConfig::load().context("loading agent configuration")? {
+    let mut config = match AgentConfig::load().context("loading agent configuration")? {
         Some(config) => config,
         None => self_register(api_url).await?,
     };
 
     let client = api::ApiClient::new(&config.api_url);
-    let mut auth = client
-        .authenticate(&config.device_id, &config.agent_secret)
-        .await
-        .context("agent authentication failed - was this device revoked?")?;
+    let mut auth = match client.authenticate(&config.device_id, &config.agent_secret).await {
+        Ok(auth) => auth,
+        Err(err) => {
+            // A saved identity that no longer authenticates (the device row
+            // was deleted or revoked server-side - a database reset during
+            // development is one real way this happens) shouldn't leave the
+            // machine permanently unreachable behind a dead credential. The
+            // whole point of self_register's AnyDesk-style front door is
+            // that this agent always has *some* working address, so treat
+            // this exactly like "nothing configured yet" and get a new one.
+            // This matters even more for the sidecar case (frontend/src-tauri)
+            // than for a console run: a sidecar has no window to show the
+            // old "was this device revoked?" message on, so without this
+            // fallback it would just silently die while the desktop app's
+            // UI kept confidently displaying the now-dead cached address.
+            warn!(error = %err, "saved device credential no longer works; registering a new device");
+            config = self_register(api_url)
+                .await
+                .context("re-registering after a stale/revoked device credential")?;
+            client
+                .authenticate(&config.device_id, &config.agent_secret)
+                .await
+                .context("authenticating with the newly self-registered device")?
+        }
+    };
 
     println!("MineDesk Agent");
     println!("Device ID: {}", config.device_id);
