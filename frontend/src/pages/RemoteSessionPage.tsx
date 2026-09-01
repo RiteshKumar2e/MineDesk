@@ -148,8 +148,10 @@ export default function RemoteSessionPage() {
   const [clipboardToast, setClipboardToast] = useState<string | null>(null);
   const [cameraState, setCameraState] = useState<CapabilityUiState>('idle');
   const [microphoneState, setMicrophoneState] = useState<CapabilityUiState>('idle');
+  const [recording, setRecording] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const cameraPreviewRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -183,6 +185,7 @@ export default function RemoteSessionPage() {
     motionChannelRef.current?.close();
     pcRef.current?.close();
     wsRef.current?.close();
+    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
     if (videoRef.current) videoRef.current.srcObject = null;
     if (cameraPreviewRef.current) cameraPreviewRef.current.srcObject = null;
     setFileChannel(null);
@@ -486,6 +489,52 @@ export default function RemoteSessionPage() {
 
   // Explicit button as a fallback for browsers/contexts where a bare paste
   // event on a non-input element doesn't fire clipboard data.
+  function downloadBlob(blob: Blob, filename: string) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function takeScreenshot() {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (blob) downloadBlob(blob, `minedesk-screenshot-${Date.now()}.png`);
+    }, 'image/png');
+  }
+
+  // Records the already-decoded video element's stream client-side - no
+  // agent or protocol changes needed, since this only ever touches what the
+  // browser is already rendering, the same as recording any other tab.
+  function toggleRecording() {
+    if (recording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    const stream = videoRef.current?.srcObject;
+    if (!(stream instanceof MediaStream)) return;
+    const chunks: Blob[] = [];
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+    const recorder = new MediaRecorder(stream, { mimeType });
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+    recorder.onstop = () => {
+      downloadBlob(new Blob(chunks, { type: mimeType }), `minedesk-recording-${Date.now()}.webm`);
+      setRecording(false);
+    };
+    recorder.start();
+    mediaRecorderRef.current = recorder;
+    setRecording(true);
+  }
+
   async function handleSendClipboard() {
     try {
       const text = await navigator.clipboard.readText();
@@ -586,6 +635,18 @@ export default function RemoteSessionPage() {
               {'\u{1F4C1} Files'}
             </button>
           )}
+          <button type="button" className="btn-secondary" disabled={!isInteractive} onClick={takeScreenshot} title="Save a screenshot of the remote screen">
+            {'\u{1F4F8} Screenshot'}
+          </button>
+          <button
+            type="button"
+            className={recording ? 'btn-secondary !bg-red-950 !text-red-300' : 'btn-secondary'}
+            disabled={!isInteractive && !recording}
+            onClick={toggleRecording}
+            title={recording ? 'Stop recording' : 'Record this session'}
+          >
+            {recording ? '\u{23F9} Stop recording' : '\u{23FA} Record'}
+          </button>
           <button
             type="button"
             className="btn-secondary"
