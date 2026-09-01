@@ -123,6 +123,7 @@ Deployed today as **Vercel** (frontend) + **Render** (backend) + **Turso** (data
 ## Docs
 
 - [backend/agent/README.md](backend/agent/README.md) — Windows agent internals, build, limitations
+- [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md) — how Windows releases are built and signed
 
 ## License
 
