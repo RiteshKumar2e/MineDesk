@@ -69,11 +69,18 @@ const schema = z.object({
   // installer is actually hosted (a CDN, object storage, a GitHub Release) -
   // the API redirects there rather than serving the file itself. Without it,
   // the API falls back to streaming a local file at AGENT_BINARY_PATH, which
-  // is only meant for local development (see RUN.md) - it requires the exact
-  // machine running the API to also have a built agent binary on disk, which
-  // is not a real deployment story.
+  // is only meant for local development - it requires the exact machine
+  // running the API to also have a built agent binary on disk, which is not
+  // a real deployment story.
   AGENT_DOWNLOAD_URL: z.string().url().optional(),
   AGENT_BINARY_PATH: z.string().default('./agent/target/release/minedesk-agent.exe'),
+
+  // Same idea as AGENT_DOWNLOAD_URL, for GET /api/v1/agent/download-desktop -
+  // wherever the built MineDesk Windows installer (frontend/src-tauri's NSIS
+  // .exe) is hosted. No local-file fallback: the installer's filename is
+  // version-stamped (MineDesk_<version>_x64-setup.exe), so there is no fixed
+  // path to fall back to the way there is for the plain agent binary.
+  DESKTOP_DOWNLOAD_URL: z.string().url().optional(),
 
   // Brute-force policy.
   LOGIN_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),

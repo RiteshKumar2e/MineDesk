@@ -605,6 +605,18 @@ export default function QuickConnectPage() {
         </div>
       </div>
 
+      {!isTauriApp && (
+        <div className="mx-auto mt-4 flex max-w-3xl items-center justify-between gap-3 rounded-xl border border-brand-200 bg-brand-50 px-4 py-3">
+          <p className="text-sm text-zinc-700">
+            Browser connections are view-only. Install the MineDesk app for full control - mouse, keyboard,
+            files and a permanent address for this computer.
+          </p>
+          <a href={`${API_URL}/api/v1/agent/download-desktop`} className="btn-primary shrink-0 whitespace-nowrap">
+            Download for Windows
+          </a>
+        </div>
+      )}
+
       <div className="mx-auto mt-6 max-w-3xl">
         <div className="mb-3 flex gap-1 border-b border-zinc-200">
           {(['recent', 'favorites'] as const).map((tab) => (

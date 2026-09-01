@@ -351,4 +351,19 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     reply.header('Content-Length', stat.size);
     return reply.send(createReadStream(binaryPath));
   });
+
+  // -------------------------------------------------------- download-desktop
+  // Same idea as /download above, but for the native Windows app
+  // (frontend/src-tauri) rather than the plain headless agent - this is what
+  // a "Download for Windows" button on the marketing/dashboard page points
+  // at. No local-file fallback (see DESKTOP_DOWNLOAD_URL's doc comment in
+  // config/env.ts): there's nothing sensible to stream when it isn't set.
+  app.get('/download-desktop', { config: { rateLimit: false } }, async (_request, reply) => {
+    if (!env.DESKTOP_DOWNLOAD_URL) {
+      throw new AppError(ErrorCode.NOT_FOUND, {
+        message: 'No desktop app download is configured. Set DESKTOP_DOWNLOAD_URL.',
+      });
+    }
+    return reply.redirect(env.DESKTOP_DOWNLOAD_URL, 302);
+  });
 }
