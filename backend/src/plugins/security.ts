@@ -28,12 +28,19 @@ export const securityPlugin = fp(async (app: FastifyInstance) => {
       if (!origin) return callback(null, true);
       if (env.webOrigins.includes(origin)) return callback(null, true);
       // The desktop app (frontend/src-tauri) serves its bundled UI from a
-      // fixed origin Tauri controls, not WEB_ORIGIN - Tauri v2 maps local
-      // app content to https://tauri.localhost on Windows (and the older
-      // tauri://localhost scheme on some platforms/versions). This is our
-      // own shipped binary, not third-party content, so it's trusted here
-      // directly rather than requiring it to be added to WEB_ORIGIN by hand.
-      if (origin === 'https://tauri.localhost' || origin === 'tauri://localhost') return callback(null, true);
+      // fixed origin Tauri controls, not WEB_ORIGIN. Confirmed by a direct
+      // debug log from the shipped app (see git history): this build uses
+      // http://tauri.localhost, not https - kept both that and the https/
+      // tauri:// variants seen across Tauri versions/platforms, since this
+      // is our own shipped binary, not third-party content, and trusting it
+      // here means nobody has to remember to add it to WEB_ORIGIN by hand.
+      if (
+        origin === 'http://tauri.localhost' ||
+        origin === 'https://tauri.localhost' ||
+        origin === 'tauri://localhost'
+      ) {
+        return callback(null, true);
+      }
       callback(null, false);
     },
     credentials: true, // required for the refresh-token cookie
