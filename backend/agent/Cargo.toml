@@ -83,3 +83,16 @@ windows = { version = "0.58", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
 ] }
+
+# webrtc-dtls 0.10.0 (pulled in transitively by `webrtc`) picks
+# elliptic_curves[0] unconditionally when processing a ClientHello, instead
+# of finding the first curve it actually supports (P256/P384/X25519). Modern
+# Chrome lists a post-quantum hybrid group ahead of those, which this crate
+# decodes as NamedCurve::Unsupported and then tries to use anyway - the
+# handshake fails with "invalid named curve", confirmed against a real
+# browser session (see git history for the observed log). Upstream bug,
+# unfixed as of this writing: https://github.com/webrtc-rs/webrtc/issues/417.
+# Patched locally in vendor/webrtc-dtls-0.10.0 (one-line fix) until upstream
+# resolves it - see that copy's flight/flight0.rs for the exact change.
+[patch.crates-io]
+webrtc-dtls = { path = "vendor/webrtc-dtls-0.10.0" }
