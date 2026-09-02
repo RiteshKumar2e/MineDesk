@@ -164,6 +164,15 @@ export default function QuickConnectPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Set when `session:ready` arrives before the human has clicked Accept -
+  // getDisplayMedia() needs a real user gesture, so unlike the native
+  // agent's auto-accept path, there can be a real, human-timescale gap
+  // between the controller joining (which is what triggers session:ready)
+  // and streamRef actually having a stream. Without remembering this, the
+  // dropped session:ready is never retried once accept finally happens,
+  // and the controller sits at "waiting for approval" forever even though
+  // the screen share was, in fact, approved.
+  const pendingReadyRef = useRef<string | null>(null);
   const iceServersRef = useRef<IceServerConfig[]>([]);
   const heartbeatRef = useRef<number | null>(null);
   const closingRef = useRef(false);
@@ -193,7 +202,10 @@ export default function QuickConnectPage() {
   const createAndSendOffer = useCallback(
     async (sessionId: string) => {
       const stream = streamRef.current;
-      if (!stream) return;
+      if (!stream) {
+        pendingReadyRef.current = sessionId;
+        return;
+      }
       const pc = new RTCPeerConnection({
         iceServers: iceServersRef.current.map((s) => ({ urls: s.urls, username: s.username, credential: s.credential })),
       });
@@ -418,6 +430,14 @@ export default function QuickConnectPage() {
       });
       sendSignal(sessionId, { type: 'session:accept', screens: [] });
       setSharing(true);
+      // The controller may already have joined and been told
+      // session:ready while we were waiting on the human to click Accept -
+      // that event was dropped (see createAndSendOffer) since there was no
+      // stream yet. Don't wait for a session:ready that already happened.
+      if (pendingReadyRef.current === sessionId) {
+        pendingReadyRef.current = null;
+        void createAndSendOffer(sessionId);
+      }
     } catch {
       sendSignal(sessionId, { type: 'session:deny', reason: 'user_declined' });
       setShareError('Screen-share permission was not granted.');
