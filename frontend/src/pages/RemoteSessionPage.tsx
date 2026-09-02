@@ -15,6 +15,20 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { FileManagerPanel } from '../components/FileManagerPanel';
 import { api, getAccessToken } from '../lib/apiClient';
 
+const isTauriApp = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+
+/** Temporary tracing for the signaling handshake - the production desktop
+ * app has no devtools console, so this is the only way to see what's
+ * actually being sent/received when a session gets stuck. Writes to the
+ * same file as QuickConnectPage's connect-error logging (see
+ * frontend/src-tauri/src/lib.rs's debug_log command). No-op in the browser. */
+function dlog(message: string) {
+  if (!isTauriApp) return;
+  void import('@tauri-apps/api/core').then(({ invoke }) =>
+    invoke('debug_log', { message: `[remote ${new Date().toISOString()}] ${message}` }).catch(() => {}),
+  );
+}
+
 type SessionPhase =
   | 'loading'
   | 'connecting'
@@ -172,7 +186,10 @@ export default function RemoteSessionPage() {
   const sendSignal = useCallback((message: Record<string, unknown>) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
+      dlog(`SEND ${JSON.stringify(message).slice(0, 200)}`);
       ws.send(JSON.stringify({ v: PROTOCOL_VERSION, sessionId, ...message }));
+    } else {
+      dlog(`SEND SKIPPED (ws not open, readyState=${ws?.readyState}) ${JSON.stringify(message).slice(0, 200)}`);
     }
   }, [sessionId]);
 
@@ -277,6 +294,7 @@ export default function RemoteSessionPage() {
       };
 
       pc.oniceconnectionstatechange = () => {
+        dlog(`ICE state: ${pc.iceConnectionState}`);
         if (cancelled) return;
         if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
           setPhase('active');
@@ -305,21 +323,28 @@ export default function RemoteSessionPage() {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        dlog('WS open, sending session:join');
         ws.send(JSON.stringify({ v: PROTOCOL_VERSION, type: 'session:join', sessionId }));
         setPhase('waiting-for-approval');
       };
 
       ws.onerror = () => {
+        dlog('WS error');
         if (!cancelled) setError('Could not reach the signaling server.');
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        dlog(`WS closed code=${event.code} reason=${event.reason}`);
         if (!cancelled && !endedRef.current) teardown('failed');
       };
 
       ws.onmessage = async (event) => {
+        dlog(`RECV ${String(event.data).slice(0, 300)}`);
         const message: ServerMessage | null = parseServerMessage(String(event.data));
-        if (!message) return;
+        if (!message) {
+          dlog('RECV parse failed');
+          return;
+        }
 
         switch (message.type) {
           case 'session:state': {
