@@ -128,6 +128,7 @@ export default function QuickConnectPage() {
   const [password, setPassword] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [wakingUp, setWakingUp] = useState(false);
 
   // ---- Recent / Favorites (localStorage - see the block above) ----
   const [listTab, setListTab] = useState<'recent' | 'favorites'>('recent');
@@ -440,12 +441,34 @@ export default function QuickConnectPage() {
     }
   }
 
+  // The free (Render) API host sleeps after inactivity and can take up to
+  // ~45s to wake on the next request - a guest-account request landing in
+  // that window can fail even though the exact same request would succeed a
+  // few seconds later, once the server has finished booting. Retried
+  // transparently here rather than surfaced as a hard error on the very
+  // first click, since from the user's perspective nothing is actually
+  // wrong - the server is just still waking up.
+  async function guestConnectWithRetry() {
+    const delaysMs = [2000, 4000, 8000, 15000, 15000];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await guestConnect('Guest');
+        return;
+      } catch (err) {
+        if (attempt >= delaysMs.length) throw err;
+        setWakingUp(true);
+        await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]));
+      }
+    }
+  }
+
   async function connectTo(rawDeviceId: string, unattendedPassword: string | undefined) {
     setConnectError(null);
     setConnecting(true);
+    setWakingUp(false);
     try {
       const normalized = normalizeCode(rawDeviceId);
-      if (!user) await guestConnect('Guest');
+      if (!user) await guestConnectWithRetry();
       const res = await createSession.mutateAsync({ deviceId: normalized, unattendedPassword });
       recordRecentConnection(normalized);
       navigate(`/remote/${res.sessionId}`);
@@ -453,6 +476,7 @@ export default function QuickConnectPage() {
       setConnectError(err instanceof ApiError ? err.message : 'Could not start a session.');
     } finally {
       setConnecting(false);
+      setWakingUp(false);
     }
   }
 
@@ -597,9 +621,12 @@ export default function QuickConnectPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
+            {wakingUp && (
+              <p className="text-sm text-amber-600">Waking up the server, please wait - this can take up to a minute...</p>
+            )}
             {connectError && <p className="text-sm text-red-600">{connectError}</p>}
             <button type="submit" className="btn-primary w-full" disabled={connecting}>
-              {connecting ? 'Connecting...' : 'Connect'}
+              {wakingUp ? 'Waking up server...' : connecting ? 'Connecting...' : 'Connect'}
             </button>
           </form>
         </div>
