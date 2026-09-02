@@ -5,7 +5,10 @@ use tauri::{
     Emitter, Manager,
 };
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 
 /// Holds the handle to the bundled `minedesk-agent` sidecar so it can be
 /// killed cleanly on Quit, rather than left as an orphaned background
@@ -105,8 +108,35 @@ pub fn run() {
             // CREATE_NO_WINDOW, so nothing flashes on screen.
             match app.shell().sidecar("minedesk-agent") {
                 Ok(sidecar) => match sidecar.spawn() {
-                    Ok((_events, child)) => {
+                    Ok((mut events, child)) => {
                         *app.state::<AgentProcess>().0.lock().unwrap() = Some(child);
+                        // The sidecar has no console (CREATE_NO_WINDOW), so
+                        // its stdout/stderr - the only way to see what the
+                        // capture/WebRTC/input code is actually doing - goes
+                        // nowhere unless something reads this event stream.
+                        // Written next to agent.toml so it's easy to find
+                        // alongside the identity it belongs to.
+                        let log_path = agent_config_path().with_file_name("agent-sidecar.log");
+                        tauri::async_runtime::spawn(async move {
+                            let mut file = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&log_path)
+                                .ok();
+                            while let Some(event) = events.recv().await {
+                                let line = match event {
+                                    CommandEvent::Stdout(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                                    CommandEvent::Stderr(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                                    CommandEvent::Error(err) => Some(format!("[sidecar error] {err}")),
+                                    CommandEvent::Terminated(payload) => Some(format!("[sidecar exited] {payload:?}")),
+                                    _ => None,
+                                };
+                                if let (Some(line), Some(file)) = (line, file.as_mut()) {
+                                    use std::io::Write;
+                                    let _ = writeln!(file, "{}", line.trim_end());
+                                }
+                            }
+                        });
                     }
                     Err(err) => log::error!("failed to start minedesk-agent sidecar: {err}"),
                 },
