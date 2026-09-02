@@ -474,6 +474,13 @@ export default function QuickConnectPage() {
       navigate(`/remote/${res.sessionId}`);
     } catch (err) {
       setConnectError(err instanceof ApiError ? err.message : 'Could not start a session.');
+      if (isTauriApp) {
+        void import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke('debug_log', {
+            message: `[connectTo ${new Date().toISOString()}] isApiError=${err instanceof ApiError} name=${err instanceof Error ? err.name : typeof err} message=${err instanceof Error ? err.message : String(err)} code=${err instanceof ApiError ? err.code : 'n/a'} status=${err instanceof ApiError ? err.status : 'n/a'} stack=${err instanceof Error ? err.stack : 'n/a'}`,
+          }).catch(() => {}),
+        );
+      }
     } finally {
       setConnecting(false);
       setWakingUp(false);

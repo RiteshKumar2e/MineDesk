@@ -36,6 +36,21 @@ fn agent_config_path() -> std::path::PathBuf {
     std::path::PathBuf::from(base).join("MineDesk").join("agent.toml")
 }
 
+/// Lets the frontend write directly to a file we can inspect, for the cases
+/// (like this one) where the production build has no devtools console to
+/// read the browser-side error from. Not wired to anything sensitive - just
+/// a plain text append.
+#[tauri::command]
+fn debug_log(message: String) {
+    if let Some(dir) = agent_config_path().parent() {
+        let path = dir.join("frontend-debug.log");
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(file, "{message}");
+        }
+    }
+}
+
 /// Polled by the frontend after launch: the sidecar self-registers
 /// asynchronously (it has to reach the API first), so the config file may
 /// not exist yet on the very first call - the frontend retries rather than
@@ -86,7 +101,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_device_identity,
             is_autostart_enabled,
-            set_autostart_enabled
+            set_autostart_enabled,
+            debug_log
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
