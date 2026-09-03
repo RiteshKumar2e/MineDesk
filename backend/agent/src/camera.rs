@@ -53,11 +53,24 @@ impl CameraCapture {
 
         let rgb_bytes = rgb.into_raw();
         let mut bgra = vec![0u8; rgb_bytes.len() / 3 * 4];
-        for (src, dst) in rgb_bytes.chunks_exact(3).zip(bgra.chunks_exact_mut(4)) {
-            dst[0] = src[2]; // B
-            dst[1] = src[1]; // G
-            dst[2] = src[0]; // R
-            dst[3] = 255; // A
+        // Webcam capture on Windows conventionally hands back bottom-up rows
+        // (the classic positive-biHeight BITMAPINFOHEADER convention many
+        // capture drivers still follow), while capture.rs's DXGI screen
+        // frames are top-down - both feed the same encode_bgra pipeline,
+        // which assumes top-down, so camera video came out upside down with
+        // no error anywhere (confirmed against real hardware: the picture
+        // was live and correctly colored, just vertically flipped). Walk
+        // the source rows back-to-front so the output is top-down like
+        // every other RawFrame producer in this codebase.
+        let stride = width as usize * 3;
+        for (dst_row, src_row) in rgb_bytes.chunks_exact(stride).rev().enumerate() {
+            let dst_start = dst_row * width as usize * 4;
+            for (src, dst) in src_row.chunks_exact(3).zip(bgra[dst_start..].chunks_exact_mut(4)) {
+                dst[0] = src[2]; // B
+                dst[1] = src[1]; // G
+                dst[2] = src[0]; // R
+                dst[3] = 255; // A
+            }
         }
 
         Ok(RawFrame { width, height, bgra })
