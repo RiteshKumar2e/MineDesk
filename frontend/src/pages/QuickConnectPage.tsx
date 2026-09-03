@@ -158,6 +158,7 @@ export default function QuickConnectPage() {
   const [shareError, setShareError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null);
+  const [minimizeToTray, setMinimizeToTray] = useState<boolean | null>(null);
   const remoteAddressInputRef = useRef<HTMLInputElement>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -398,6 +399,11 @@ export default function QuickConnectPage() {
     } catch {
       setAutostartEnabled(null);
     }
+    try {
+      setMinimizeToTray(await invoke<boolean>('get_minimize_to_tray'));
+    } catch {
+      setMinimizeToTray(null);
+    }
   }
 
   async function toggleAutostart(enabled: boolean) {
@@ -407,6 +413,16 @@ export default function QuickConnectPage() {
       await invoke('set_autostart_enabled', { enabled });
     } catch {
       setAutostartEnabled(!enabled);
+    }
+  }
+
+  async function toggleMinimizeToTray(enabled: boolean) {
+    setMinimizeToTray(enabled);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_minimize_to_tray', { enabled });
+    } catch {
+      setMinimizeToTray(!enabled);
     }
   }
 
@@ -547,10 +563,27 @@ export default function QuickConnectPage() {
               />
             </label>
 
+            <label className="mt-3 flex items-center justify-between gap-4">
+              <span className="text-sm text-zinc-700">Keep running in background when closed</span>
+              <input
+                type="checkbox"
+                checked={minimizeToTray ?? true}
+                disabled={minimizeToTray === null}
+                onChange={(e) => void toggleMinimizeToTray(e.target.checked)}
+                className="h-4 w-4 accent-brand-600"
+              />
+            </label>
+
             <p className="mt-4 text-xs text-zinc-500">
-              Closing this window keeps MineDesk running in the background so this computer stays
-              reachable. Use <span className="font-medium">Quit MineDesk</span> from the tray icon to
-              exit completely.
+              {minimizeToTray === false
+                ? 'Closing this window fully quits MineDesk and stops the agent - this computer will not be reachable until you reopen it.'
+                : (
+                  <>
+                    Closing this window keeps MineDesk running in the background so this computer stays
+                    reachable. Use <span className="font-medium">Quit MineDesk</span> from the tray icon to
+                    exit completely.
+                  </>
+                )}
             </p>
 
             <button type="button" className="btn-secondary mt-5 w-full" onClick={() => setShowSettings(false)}>

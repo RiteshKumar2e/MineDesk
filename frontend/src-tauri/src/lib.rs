@@ -36,6 +36,50 @@ fn agent_config_path() -> std::path::PathBuf {
     std::path::PathBuf::from(base).join("MineDesk").join("agent.toml")
 }
 
+/// Real, persisted user preference - not a UI-only toggle. Stored next to
+/// agent.toml so it survives updates the same way the device identity does.
+/// Default (missing file) is `true`: matches the tray-resident behavior
+/// this app has always had, so upgrading from an older version that had no
+/// such setting doesn't silently change what closing the window does.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppSettings {
+    #[serde(default = "default_true")]
+    minimize_to_tray: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { minimize_to_tray: true }
+    }
+}
+
+fn settings_path() -> std::path::PathBuf {
+    agent_config_path().with_file_name("desktop-settings.json")
+}
+
+fn load_settings() -> AppSettings {
+    std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_minimize_to_tray() -> bool {
+    load_settings().minimize_to_tray
+}
+
+#[tauri::command]
+fn set_minimize_to_tray(enabled: bool) -> Result<(), String> {
+    let settings = AppSettings { minimize_to_tray: enabled };
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(settings_path(), json).map_err(|e| e.to_string())
+}
+
 /// Lets the frontend write directly to a file we can inspect, for the cases
 /// (like this one) where the production build has no devtools console to
 /// read the browser-side error from. Not wired to anything sensitive - just
@@ -102,6 +146,8 @@ pub fn run() {
             get_device_identity,
             is_autostart_enabled,
             set_autostart_enabled,
+            get_minimize_to_tray,
+            set_minimize_to_tray,
             debug_log
         ])
         .setup(|app| {
@@ -215,15 +261,21 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             // The whole point of a remote-desktop client is that the
-            // machine stays reachable after you close the dashboard - so
-            // the window's X button hides it rather than exiting the app,
-            // exactly like AnyDesk/TeamViewer's tray-resident behavior. The
-            // agent (and this process) only actually stop via the tray's
-            // "Quit MineDesk", handled in the tray menu below.
+            // machine stays reachable after you close the dashboard - so by
+            // default the window's X button hides it rather than exiting
+            // the app, exactly like AnyDesk/TeamViewer's tray-resident
+            // behavior. This is now a real, persisted preference (Settings
+            // panel) rather than the only option: someone who never wants
+            // background access can turn it off and have X actually quit,
+            // stopping the agent with it.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
+                    if load_settings().minimize_to_tray {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        kill_agent(window.app_handle());
+                    }
                 }
             }
         })
