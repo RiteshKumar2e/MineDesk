@@ -20,7 +20,7 @@ use crate::signaling::SignalingSender;
 use crate::video::H264Encoder;
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -108,6 +108,7 @@ pub struct ActiveSession {
     microphone: Option<CaptureHandle>,
     file_transfer: Option<FileTransferHandler>,
     clipboard_sync: Option<Arc<ClipboardSync>>,
+    reliable_channel: Arc<RTCDataChannel>,
 }
 
 /// A background capture loop plus its cooperative stop signal.
@@ -289,6 +290,18 @@ impl ActiveSession {
     /// very first offer (once `session:ready` confirms the controller has
     /// joined - see `main.rs`) and for every later renegotiation (adding a
     /// camera/microphone track); WebRTC does not distinguish an initial
+    /// Sends a chat message to the controller over the same reliable channel
+    /// mouse/keyboard/clipboard already use. Unlike those, chat carries no
+    /// OS-level privilege, so there is no capability to check here - anyone
+    /// who reached an active session (already gated by ownership/unattended
+    /// password at session creation) can send one.
+    pub async fn send_chat(&self, text: String) -> Result<()> {
+        let message = crate::protocol::InputMessage::ChatMessage { text, sent_at: crate::protocol::now_ms() };
+        let json = serde_json::to_string(&message).context("serializing chat message")?;
+        self.reliable_channel.send_text(json).await.context("sending chat message")?;
+        Ok(())
+    }
+
     /// offer from a renegotiation at the API level, so neither does this.
     pub async fn renegotiate(&self) -> Result<()> {
         let offer = self.peer_connection.create_offer(None).await.context("creating SDP offer")?;
@@ -343,7 +356,7 @@ pub async fn start(
     capabilities: SessionCapabilities,
     shared_folders: Vec<String>,
     signaling: Arc<Mutex<SignalingSender>>,
-) -> Result<(ActiveSession, Option<(u32, u32)>)> {
+) -> Result<(ActiveSession, Vec<ScreenInfo>)> {
     let mut media_engine = MediaEngine::default();
     media_engine.register_default_codecs().context("registering default WebRTC codecs")?;
     let api = APIBuilder::new().with_media_engine(media_engine).build();
@@ -353,7 +366,12 @@ pub async fn start(
 
     // --- video track (screen capability only) --------------------------
     let mut video_handle = None;
-    let mut dimensions = None;
+    let mut screens = Vec::new();
+    // Shared with wire_input_channel below: u32::MAX means "no pending
+    // switch". A plain atomic rather than a channel because the video loop
+    // only needs the *latest* requested monitor, never a queue of them -
+    // several switch requests in a row should just land on the last one.
+    let monitor_switch = Arc::new(AtomicU32::new(u32::MAX));
     if capabilities.screen {
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability { mime_type: MIME_TYPE_H264.to_owned(), ..Default::default() },
@@ -365,13 +383,29 @@ pub async fn start(
             .await
             .context("adding video track")?;
 
-        let capture = tokio::task::spawn_blocking(ScreenCapture::new)
+        let capture = tokio::task::spawn_blocking(|| ScreenCapture::new(0))
             .await
             .context("capture init task panicked")?
             .context("failed to initialize screen capture")?;
-        dimensions = Some(capture.dimensions());
+        screens = match crate::capture::enumerate_outputs() {
+            Ok(outputs) => outputs
+                .into_iter()
+                .map(|o| ScreenInfo {
+                    id: o.index.to_string(),
+                    label: if o.primary { "Primary display".to_string() } else { format!("Display {}", o.index + 1) },
+                    width: o.width,
+                    height: o.height,
+                    primary: o.primary,
+                })
+                .collect(),
+            Err(err) => {
+                warn!(session_id = %session_id, error = %err, "failed to enumerate monitors, reporting the active one only");
+                let (width, height) = capture.dimensions();
+                vec![ScreenInfo { id: "0".to_string(), label: "Primary display".to_string(), width, height, primary: true }]
+            }
+        };
         let stop = Arc::new(AtomicBool::new(false));
-        let task = spawn_video_loop(capture, video_track, session_id.clone(), stop.clone());
+        let task = spawn_video_loop(capture, video_track, session_id.clone(), stop.clone(), monitor_switch.clone());
         video_handle = Some(CaptureHandle { task, stop });
     }
 
@@ -423,8 +457,8 @@ pub async fn start(
     };
 
     let injector = Arc::new(InputInjector::new());
-    wire_input_channel(reliable_channel.clone(), injector.clone(), session_id.clone(), capabilities, clipboard_sync.clone());
-    wire_input_channel(motion_channel, injector, session_id.clone(), capabilities, clipboard_sync.clone());
+    wire_input_channel(reliable_channel.clone(), injector.clone(), session_id.clone(), capabilities, clipboard_sync.clone(), monitor_switch.clone());
+    wire_input_channel(motion_channel, injector, session_id.clone(), capabilities, clipboard_sync.clone(), monitor_switch.clone());
 
     // --- file transfer channel -------------------------------------------
     let file_transfer = if capabilities.file_upload || capabilities.file_download || capabilities.file_delete {
@@ -519,8 +553,9 @@ pub async fn start(
             microphone: None,
             file_transfer,
             clipboard_sync,
+            reliable_channel,
         },
-        dimensions,
+        screens,
     ))
 }
 
@@ -543,6 +578,7 @@ fn spawn_video_loop(
     video_track: Arc<TrackLocalStaticSample>,
     session_id: String,
     stop: Arc<AtomicBool>,
+    monitor_switch: Arc<AtomicU32>,
 ) -> JoinHandle<()> {
     // Must match `max_frame_rate` in video.rs's encoder config.
     const TARGET_FPS: u32 = 30;
@@ -566,6 +602,27 @@ fn spawn_video_loop(
 
         while !stop.load(Ordering::Relaxed) {
             let frame_start = std::time::Instant::now();
+
+            // Ordering::SeqCst here pairs with the store in
+            // wire_input_channel - swap rather than load-then-store so two
+            // switch requests landing back to back can't both be consumed
+            // as the same one.
+            let requested = monitor_switch.swap(u32::MAX, Ordering::SeqCst);
+            if requested != u32::MAX {
+                match capture.switch_output(requested) {
+                    Ok(()) => {
+                        let (width, height) = capture.dimensions();
+                        match H264Encoder::new(width, height) {
+                            Ok(e) => encoder = e,
+                            Err(err) => {
+                                error!(session_id = %session_id, error = %err, "failed to reinitialize H264 encoder after monitor switch");
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) => warn!(session_id = %session_id, error = %err, monitor = requested, "failed to switch monitor, staying on the current one"),
+                }
+            }
 
             match capture.next_frame(CAPTURE_WAIT_MS) {
                 Ok(Some(frame)) => match encoder.encode_bgra(&frame) {
@@ -757,6 +814,7 @@ fn wire_input_channel(
     session_id: String,
     capabilities: SessionCapabilities,
     clipboard_sync: Option<Arc<ClipboardSync>>,
+    monitor_switch: Arc<AtomicU32>,
 ) {
     let channel_label = channel.label().to_string();
     channel.on_open(Box::new(move || {
@@ -767,6 +825,7 @@ fn wire_input_channel(
     channel.on_message(Box::new(move |msg: DataChannelMessage| {
         let injector = injector.clone();
         let clipboard_sync = clipboard_sync.clone();
+        let monitor_switch = monitor_switch.clone();
         Box::pin(async move {
             let Ok(text) = String::from_utf8(msg.data.to_vec()) else { return };
             let Ok(input) = serde_json::from_str::<crate::protocol::InputMessage>(&text) else {
@@ -799,6 +858,20 @@ fn wire_input_channel(
             }
 
             match &input {
+                crate::protocol::InputMessage::SelectMonitor { index } => {
+                    monitor_switch.store(*index, Ordering::SeqCst);
+                }
+                crate::protocol::InputMessage::ChatMessage { text, .. } => {
+                    // No capability gate: chat carries no OS-level privilege
+                    // (see send_chat's doc comment). Printed to stdout so it
+                    // reaches an interactive console session directly, and
+                    // reaches the desktop app's log file when running as its
+                    // sidecar (frontend/src-tauri captures this stream) -
+                    // there is no live GUI to render it into on this side
+                    // yet, so a console-visible line is the honest, real
+                    // implementation rather than a fake "delivered" status.
+                    println!("[Chat] Controller: {text}");
+                }
                 crate::protocol::InputMessage::Shortcut { name } if name == "ctrl-alt-del" => {
                     if let Err(err) = sas::send_secure_attention_sequence() {
                         warn!(error = %err, "Ctrl+Alt+Del request could not be delivered");
@@ -822,12 +895,6 @@ fn wire_input_channel(
     }));
 }
 
-pub fn primary_screen_info(dimensions: Option<(u32, u32)>) -> Vec<ScreenInfo> {
-    match dimensions {
-        Some((width, height)) => vec![ScreenInfo { id: "0".to_string(), label: "Primary display".to_string(), width, height, primary: true }],
-        None => vec![],
-    }
-}
 
 /// Shared by `ActiveSession::restart_ice` and the proactive disconnect
 /// watcher registered in `start()` - the watcher runs from a closure that

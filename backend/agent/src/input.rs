@@ -75,6 +75,11 @@ impl InputInjector {
             // variant, and correctly has nothing for an *input injector* to do.
             InputMessage::Shortcut { .. } => {}
             InputMessage::ClipboardText { .. } => {}
+            // Handled upstream in session.rs's wire_input_channel too (chat
+            // carries no OS input to inject, and monitor selection is a
+            // capture-pipeline change, not an input event).
+            InputMessage::ChatMessage { .. } => {}
+            InputMessage::SelectMonitor { .. } => {}
         }
     }
 

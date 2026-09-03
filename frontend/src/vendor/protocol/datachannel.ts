@@ -83,6 +83,29 @@ export const ClipboardEvent = z.object({
   text: z.string().max(1_000_000),
 });
 
+/**
+ * Session chat - unlike mouse/keyboard, this carries no OS-level privilege,
+ * so it is safe to allow even on a view-only browser-to-browser session
+ * (Phase 21's "browser-to-browser is view-only" rule is about input
+ * injection, not messaging). `from` is set by the receiver from its own
+ * knowledge of who's on the other end, not trusted from the payload.
+ */
+export const ChatMessageEvent = z.object({
+  type: z.literal('chat:message'),
+  text: z.string().min(1).max(4000),
+  sentAt: z.number(),
+});
+
+/** Requests the agent switch its captured display mid-session - `index`
+ * matches one of the entries in the `screens` list from `session:accept`
+ * (see vendor/protocol/signaling.ts). No permission gate beyond `screen`
+ * itself: picking which of your own monitors to show isn't a bigger grant
+ * than the screen capability already is. */
+export const SelectMonitorEvent = z.object({
+  type: z.literal('monitor:select'),
+  index: z.number().int().min(0),
+});
+
 export const InputMessage = z.discriminatedUnion('type', [
   MouseMoveEvent,
   MouseButtonEvent,
@@ -91,6 +114,8 @@ export const InputMessage = z.discriminatedUnion('type', [
   KeyEvent,
   ShortcutEvent,
   ClipboardEvent,
+  ChatMessageEvent,
+  SelectMonitorEvent,
 ]);
 
 export type InputMessage = z.infer<typeof InputMessage>;

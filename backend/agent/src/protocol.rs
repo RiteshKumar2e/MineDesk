@@ -254,7 +254,7 @@ impl ClientFrame {
     }
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -284,6 +284,10 @@ pub enum InputMessage {
     Shortcut { name: String },
     #[serde(rename = "clipboard:text")]
     ClipboardText { direction: String, text: String },
+    #[serde(rename = "chat:message")]
+    ChatMessage { text: String, #[serde(rename = "sentAt")] sent_at: i64 },
+    #[serde(rename = "monitor:select")]
+    SelectMonitor { index: u32 },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

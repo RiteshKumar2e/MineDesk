@@ -163,6 +163,12 @@ export default function RemoteSessionPage() {
   const [cameraState, setCameraState] = useState<CapabilityUiState>('idle');
   const [microphoneState, setMicrophoneState] = useState<CapabilityUiState>('idle');
   const [recording, setRecording] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [chatMessages, setChatMessages] = useState<{ from: 'me' | 'remote'; text: string; sentAt: number }[]>([]);
+  const [unreadChat, setUnreadChat] = useState(0);
+  const [screens, setScreens] = useState<{ id: string; label: string; width: number; height: number; primary: boolean }[]>([]);
+  const [activeMonitor, setActiveMonitor] = useState('0');
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -287,6 +293,10 @@ export default function RemoteSessionPage() {
               clipboardFromRemoteRef.current = message.text;
               reportActivity(sessionId, 'usedClipboard');
             }
+            if (message?.type === 'chat:message') {
+              setChatMessages((prev) => [...prev, { from: 'remote', text: message.text, sentAt: message.sentAt }]);
+              setUnreadChat((prev) => prev + 1);
+            }
           });
         }
         if (channel.label === INPUT_CHANNEL_MOTION) motionChannelRef.current = channel;
@@ -347,6 +357,11 @@ export default function RemoteSessionPage() {
         }
 
         switch (message.type) {
+          case 'session:accept': {
+            setScreens(message.screens ?? []);
+            return;
+          }
+
           case 'session:state': {
             if (message.status === 'active') setPhase((p) => (p === 'loading' ? 'active' : p));
             if (message.status === 'denied') teardown('denied');
@@ -491,6 +506,25 @@ export default function RemoteSessionPage() {
     const video = videoRef.current;
     const point = video && normalizedVideoCoordinates(video, e.clientX, e.clientY);
     if (point) sendInput({ type: 'mouse:wheel', deltaX: e.deltaX, deltaY: e.deltaY, ...point });
+  }
+
+  function sendChatMessage() {
+    const text = chatInput.trim();
+    if (!text) return;
+    const sentAt = Date.now();
+    sendInput({ type: 'chat:message', text, sentAt });
+    setChatMessages((prev) => [...prev, { from: 'me', text, sentAt }]);
+    setChatInput('');
+  }
+
+  function toggleChat() {
+    setShowChat((v) => !v);
+    setUnreadChat(0);
+  }
+
+  function selectMonitor(id: string) {
+    setActiveMonitor(id);
+    sendInput({ type: 'monitor:select', index: Number(id) });
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
@@ -672,6 +706,35 @@ export default function RemoteSessionPage() {
           >
             {recording ? '\u{23F9} Stop recording' : '\u{23FA} Record'}
           </button>
+          {screens.length > 1 && (
+            <select
+              className="input !w-auto !py-1.5 text-sm"
+              value={activeMonitor}
+              onChange={(e) => selectMonitor(e.target.value)}
+              disabled={!isInteractive}
+              title="Switch monitor"
+            >
+              {screens.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label} ({s.width}×{s.height})
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            type="button"
+            className="btn-secondary relative"
+            disabled={!isInteractive}
+            onClick={toggleChat}
+            title="Chat with the remote side"
+          >
+            {'\u{1F4AC} Chat'}
+            {unreadChat > 0 && (
+              <span className="absolute -right-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[10px] text-white">
+                {unreadChat > 9 ? '9+' : unreadChat}
+              </span>
+            )}
+          </button>
           <button
             type="button"
             className="btn-secondary"
@@ -686,6 +749,49 @@ export default function RemoteSessionPage() {
           </button>
         </div>
       </header>
+
+      {showChat && (
+        <div className="absolute bottom-4 right-4 z-20 flex h-96 w-80 flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
+          <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+            <span className="text-sm font-medium text-zinc-100">Chat</span>
+            <button type="button" className="text-zinc-400 hover:text-zinc-100" onClick={() => setShowChat(false)} aria-label="Close chat">
+              ✕
+            </button>
+          </div>
+          <div className="flex-1 space-y-2 overflow-y-auto p-3">
+            {chatMessages.length === 0 && <p className="text-xs text-zinc-500">No messages yet.</p>}
+            {chatMessages.map((m, i) => (
+              <div key={i} className={m.from === 'me' ? 'text-right' : 'text-left'}>
+                <span
+                  className={
+                    'inline-block max-w-[85%] rounded-lg px-2.5 py-1.5 text-sm ' +
+                    (m.from === 'me' ? 'bg-brand-600 text-white' : 'bg-zinc-800 text-zinc-100')
+                  }
+                >
+                  {m.text}
+                </span>
+              </div>
+            ))}
+          </div>
+          <form
+            className="flex gap-2 border-t border-zinc-800 p-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              sendChatMessage();
+            }}
+          >
+            <input
+              className="input flex-1 !bg-zinc-800 !text-zinc-100"
+              placeholder="Type a message..."
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+            />
+            <button type="submit" className="btn-primary" disabled={!chatInput.trim()}>
+              Send
+            </button>
+          </form>
+        </div>
+      )}
 
       {clipboardToast && (
         <button

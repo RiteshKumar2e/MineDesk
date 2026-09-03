@@ -1,6 +1,6 @@
 [package]
 name = "minedesk"
-version = "4.0.0"
+version = "6.0.0"
 description = "MineDesk - secure remote desktop client"
 authors = ["MineDesk"]
 license = "MIT"

@@ -6,7 +6,10 @@
 //! session, and now camera/microphone activity) as plain status lines, and
 //! accepts single-letter commands followed by Enter: "d" disconnects the
 //! active session, "c" stops an active camera stream, "m" stops an active
-//! microphone stream, and "q" quits.
+//! microphone stream, "q" quits, and any other line is sent as a chat
+//! message to the controller (see session.rs's `send_chat`) - this console
+//! doubles as the chat UI on this side, since there is no other window to
+//! render one into yet.
 //!
 //! There is no local y/n accept prompt, by design, matching AnyDesk's own
 //! "assigned device" behavior: the server has already authorized an incoming
@@ -279,7 +282,7 @@ async fn run(api_url: &str) -> Result<()> {
         if auth.unattended_access_enabled { "Enabled" } else { "Disabled" }
     );
     println!("Status: connecting...");
-    println!("(type 'd' to disconnect, 'c'/'m' to stop camera/microphone, 'q' to quit - each followed by Enter)");
+    println!("(type 'd' to disconnect, 'c'/'m' to stop camera/microphone, 'q' to quit, or anything else to chat - each followed by Enter)");
 
     let (sender, mut inbound) = signaling::connect(&auth.signal_url, &auth.token)
         .await
@@ -295,7 +298,12 @@ async fn run(api_url: &str) -> Result<()> {
     tokio::spawn(async move {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if stdin_tx.send(line.trim().to_lowercase()).is_err() {
+            // Case preserved now that a non-command line can be a chat
+            // message (see the "_" arm below) - only the single-letter
+            // command comparisons need lowercasing, done at the match site
+            // instead of here, so "Hello" doesn't arrive at the controller
+            // as "hello".
+            if stdin_tx.send(line.trim().to_string()).is_err() {
                 break;
             }
         }
@@ -356,7 +364,7 @@ async fn run(api_url: &str) -> Result<()> {
             }
 
             Some(line) = stdin_rx.recv() => {
-                match line.as_str() {
+                match line.to_lowercase().as_str() {
                     "d" => {
                         if let Some(session) = active.take() {
                             println!("Disconnecting session {}...", session.session_id);
@@ -395,7 +403,20 @@ async fn run(api_url: &str) -> Result<()> {
                         println!("Goodbye.");
                         return Ok(());
                     }
-                    _ => {}
+                    "" => {}
+                    _ => {
+                        // Anything else, with an active session, is a chat
+                        // reply - the console doubles as the chat UI on this
+                        // side (see session.rs's ChatMessage doc comment for
+                        // why there's no capability gate on it).
+                        if let Some(session) = active.as_ref() {
+                            if let Err(err) = session.send_chat(line.clone()).await {
+                                warn!(error = %err, "failed to send chat message");
+                            }
+                        } else {
+                            println!("No active session - nothing to chat with.");
+                        }
+                    }
                 }
             }
 
@@ -648,8 +669,8 @@ async fn accept_session(
     let shared_folders = agent_config.shared_folders.clone();
 
     match session::start(session_id.clone(), ice_servers, session_capabilities, shared_folders, sender.clone()).await {
-        Ok((session, dimensions)) => {
-            let accept = ClientFrame::session_accept(session_id.clone(), session::primary_screen_info(dimensions));
+        Ok((session, screens)) => {
+            let accept = ClientFrame::session_accept(session_id.clone(), screens);
             if let Err(err) = sender.lock().await.send(&accept).await {
                 warn!(error = %err, "failed to send session:accept");
             }

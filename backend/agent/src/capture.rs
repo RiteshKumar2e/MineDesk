@@ -3,8 +3,10 @@
 //! This is the standard, GPU-accelerated way to grab frames on Windows 8+:
 //! the OS composits into a shared texture and hands the caller only the
 //! regions that changed, rather than the caller polling and diffing pixels
-//! itself. It captures the primary display's output 0 only - multi-monitor
-//! selection is future work (see the module doc in `input.rs`).
+//! itself. `enumerate_outputs` lists every connected display; `new`/
+//! `switch_output` take an index into that list, so a session can start on
+//! the primary display and switch mid-session (see session.rs's handling of
+//! `InputMessage::SelectMonitor`).
 //!
 //! Known limitations inherent to this API, not this implementation:
 //!   - Cannot capture the secure desktop (UAC consent prompts, the lock
@@ -28,9 +30,56 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::{
     IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+
+/// One physical display, as DXGI enumerates it. `index` is what
+/// `ScreenCapture::new`/`switch_output` take to select this display, and
+/// what the controller sends back in a monitor-switch request - stable for
+/// the lifetime of the agent process, not necessarily across a real
+/// monitor unplug/replug (DXGI would renumber in that case, same as any
+/// other API built on it).
+#[derive(Debug, Clone)]
+pub struct OutputInfo {
+    pub index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// Enumerates every output DXGI reports on the default adapter, stopping at
+/// the first index that errors (DXGI's own convention for "no more outputs"
+/// - there is no separate count query). A machine with one monitor gets a
+/// one-element list; this replaces what used to be a hardcoded single entry
+/// (see this module's previous doc comment) with what is actually
+/// connected. Creates its own throwaway D3D11 device rather than requiring
+/// a `ScreenCapture` to already exist, since this is called once up front
+/// (to report the list to the controller) even when no capture has started
+/// yet, and is cheap enough that a second device for the real capture right
+/// after costs nothing worth avoiding.
+pub fn enumerate_outputs() -> Result<Vec<OutputInfo>> {
+    let (device, _context) = create_d3d11_device()?;
+    let dxgi_device: IDXGIDevice = device.cast().context("casting D3D11 device to IDXGIDevice")?;
+    let adapter = unsafe { dxgi_device.GetAdapter() }.context("getting DXGI adapter")?;
+
+    let mut outputs = Vec::new();
+    for index in 0.. {
+        let output = match unsafe { adapter.EnumOutputs(index) } {
+            Ok(output) => output,
+            Err(_) => break, // DXGI_ERROR_NOT_FOUND once the index runs out - not a real error
+        };
+        let desc = unsafe { output.GetDesc() }.context("getting output description")?;
+        let rect = desc.DesktopCoordinates;
+        outputs.push(OutputInfo {
+            index,
+            width: (rect.right - rect.left).max(0) as u32,
+            height: (rect.bottom - rect.top).max(0) as u32,
+            primary: index == 0,
+        });
+    }
+    Ok(outputs)
+}
 
 pub struct RawFrame {
     pub width: u32,
@@ -51,9 +100,11 @@ pub struct ScreenCapture {
 }
 
 impl ScreenCapture {
-    pub fn new() -> Result<Self> {
+    /// `output_index` matches `OutputInfo::index` from `enumerate_outputs` -
+    /// 0 (the primary display) if the caller has no reason to pick another.
+    pub fn new(output_index: u32) -> Result<Self> {
         let (device, context) = create_d3d11_device()?;
-        let output = primary_output(&device)?;
+        let output = output_at(&device, output_index)?;
         let (duplication, width, height) = duplicate_output(&device, &output)?;
 
         Ok(Self { device, context, output, duplication, width, height })
@@ -61,6 +112,22 @@ impl ScreenCapture {
 
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Switches to a different physical display mid-session. Re-runs the
+    /// same output-selection and duplication setup `new` does, on the
+    /// existing D3D11 device rather than creating a second one - the caller
+    /// (session.rs's video loop) is expected to also recreate its H.264
+    /// encoder if `dimensions()` comes back different afterward, since
+    /// OpenH264 is initialized for a fixed resolution.
+    pub fn switch_output(&mut self, output_index: u32) -> Result<()> {
+        let output = output_at(&self.device, output_index)?;
+        let (duplication, width, height) = duplicate_output(&self.device, &output)?;
+        self.output = output;
+        self.duplication = duplication;
+        self.width = width;
+        self.height = height;
+        Ok(())
     }
 
     /// Blocks up to `timeout_ms` for a new frame. Returns `Ok(None)` on a
@@ -185,10 +252,10 @@ fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     ))
 }
 
-fn primary_output(device: &ID3D11Device) -> Result<IDXGIOutput1> {
+fn output_at(device: &ID3D11Device, index: u32) -> Result<IDXGIOutput1> {
     let dxgi_device: IDXGIDevice = device.cast().context("casting D3D11 device to IDXGIDevice")?;
     let adapter = unsafe { dxgi_device.GetAdapter() }.context("getting DXGI adapter")?;
-    let output = unsafe { adapter.EnumOutputs(0) }.context("enumerating output 0 (primary display)")?;
+    let output = unsafe { adapter.EnumOutputs(index) }.with_context(|| format!("enumerating output {index}"))?;
     output.cast().context("casting IDXGIOutput to IDXGIOutput1")
 }
 
